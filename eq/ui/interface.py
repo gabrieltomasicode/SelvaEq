@@ -2,16 +2,21 @@
 Interface Gráfica Principal do Equalizador (`EqInterface` / `PyGraphUI` - `eq/ui/interface.py`).
 
 Refatorado a partir de `ui/interface.py` (`FullSynthInterface`) do SelvaSonic:
-- Layout 100% responsivo a mudanças de tamanho de janela (`<Configure>`, `rowconfigure`, `columnconfigure`)
-  e suporte nativo a Tela Cheia (`toggle_fullscreen` via botão ou tecla `F11` e saída com `Escape`).
-- Sistema de 3 Abas Modulares (estilo SelvaSonic):
-  1. "Equalizador & Bandas" (`bands`): edição paramétrica das 24 bandas + Flat + Navegação + Undo/Redo/A-B.
-  2. "Entrada & Saída de Áudio" (`io`): seleção independente de dispositivos de Entrada e Saída,
-     Sample Rate, Buffer Size, Oversampling, Ganho Master e Mute.
-  3. "Modo de Teste (MP3 / WAV)" (`test`): injeção de arquivos `.mp3`/`.wav` em tempo real no
-     fluxo de áudio via `RealtimeMediaStreamer`, controles de transporte, presets de fábrica,
-     exportação WAV, Freeze FFT e gerador de faixa demo.
-- Gráfico de Espectro e Curva Interativo (`InteractiveCurveController` + `BandNode`):
+- Layout 100% responsivo a mudanças de tamanho de janela (`<Configure>`, `rowconfigure`, `columnconfigure`),
+  redimensionamento real da `Figure` Matplotlib com debounce de `60 ms` sem faixa branca (D01),
+  cabeçalho sem truncamento com badge `"● SALVO"` / `"● NÃO SALVO"` (D02), altura fixa unificada do
+  painel inferior sem pulo entre abas (D04) e suporte nativo a Tela Cheia (`toggle_fullscreen` via
+  botão ou tecla `F11` e saída com `Escape`).
+- Sistema de 3 Abas Modulares (estilo SelvaSonic) com ícones e alto contraste (D07):
+  1. "🎚 1. Equalizador & Bandas" (`bands`): edição paramétrica das 24 bandas + Flat + Navegação + Undo/Redo/A-B (D03).
+  2. "🔌 2. Entrada & Saída de Áudio" (`io`): seleção independente de dispositivos de Entrada e Saída,
+     Sample Rate, Buffer Size, Oversampling, Ganho Master, Mid/Side ON/OFF e LED de status (D09).
+  3. "▶ 3. Modo de Teste (MP3 / WAV)" (`test`): injeção de arquivos `.mp3`/`.wav` em tempo real no
+     fluxo de áudio via `RealtimeMediaStreamer`, controles de transporte agrupados, presets de fábrica,
+     exportação WAV, Freeze FFT e gerador de faixa demo (D10).
+- Gráfico de Espectro e Curva Interativo (`InteractiveCurveController` + `BandNode`) com eixos e grade
+  de década de alto contraste, fill suave (`alpha=0.06`), legenda compacta (D06) e barra inferior
+  contextual dinâmica (D05):
   - Duplo clique esquerdo sobre nó existente: reseta ganho da banda para `0.0 dB` (F01).
   - Duplo clique esquerdo (ou `Shift + Clique esquerdo`) em área livre: cria nova banda.
   - Arrastar com clique esquerdo: edita Frequência e Ganho com HUD flutuante em tempo real (V06).
@@ -42,6 +47,7 @@ from eq.ui.widgets import (
     tk,
     C_AMARELO,
     C_VERDE,
+    C_VERDE_CLARO,
     C_MARROM,
     C_AZUL,
     C_VERMELHO,
@@ -52,6 +58,7 @@ from eq.ui.widgets import (
     C_BG3,
     C_TEXTO,
     C_TEXTO2,
+    C_EIXO,
     F_BEBAS,
     F_BARLOW,
     F_SPACE,
@@ -105,6 +112,10 @@ class EqInterface:
         self.curve_controller.selected_index = self.selected_band_index
 
         self.visual_update_id = None
+        self._resize_job = None
+        self.dirty_badge_label = None
+        self.footer_label = None
+        self.legend = None
         self.visual_paused: bool = False
         self.clip_indicator_state: bool = False
         self.is_fullscreen: bool = False
@@ -145,12 +156,29 @@ class EqInterface:
             pass
 
     def _update_window_title(self) -> None:
-        """Atualiza o título da janela exibindo '*' quando houver modificações não salvas (F11)."""
+        """Atualiza o título da janela e o badge visual ('● SALVO' vs '● NÃO SALVO') (F11 / D02)."""
+        is_dirty = bool(self.engine.state_controller.dirty)
         base_title = "SelvaEQ - 24-Band Parametric Equalizer"
-        dirty_suffix = " *" if self.engine.state_controller.dirty else ""
+        dirty_suffix = " *" if is_dirty else ""
         if hasattr(self.master, "title"):
             try:
                 self.master.title(f"{base_title}{dirty_suffix}")
+            except Exception:
+                pass
+        if getattr(self, "dirty_badge_label", None) is not None:
+            try:
+                if is_dirty:
+                    self.dirty_badge_label.config(
+                        text="● NÃO SALVO",
+                        fg=C_AMARELO,
+                        highlightbackground=C_AMARELO,
+                    )
+                else:
+                    self.dirty_badge_label.config(
+                        text="● SALVO",
+                        fg=C_TEXTO2,
+                        highlightbackground=C_MARROM,
+                    )
             except Exception:
                 pass
 
@@ -184,7 +212,7 @@ class EqInterface:
     #  Configuração de Janela Responsiva, Tema Escuro e Modo Tela Cheia
     # ─────────────────────────────────────────────────────────────────────────
     def _configure_responsive_window(self) -> None:
-        """Configura tema escuro ttk (V01), pesos de grid responsivos e tamanho mínimo."""
+        """Configura tema escuro ttk (V01), pesos de grid responsivos e painel inferior com altura fixa (D01 / D04)."""
         apply_dark_ttk_style(self.master)
         self._update_window_title()
         if hasattr(self.master, "configure"):
@@ -203,10 +231,10 @@ class EqInterface:
             self.master.columnconfigure(0, weight=1)
         if hasattr(self.master, "rowconfigure"):
             self.master.rowconfigure(0, weight=0)
-            self.master.rowconfigure(1, weight=3)
-            self.master.rowconfigure(2, weight=0)
-            self.master.rowconfigure(3, weight=1)
-            self.master.rowconfigure(4, weight=0)
+            self.master.rowconfigure(1, weight=1)               # Gráfico expande em 100% da área livre (D01 / D04)
+            self.master.rowconfigure(2, weight=0)               # Barra de abas fixa
+            self.master.rowconfigure(3, weight=0, minsize=235)  # Painel inferior com altura fixa constante (D04)
+            self.master.rowconfigure(4, weight=0)               # Barra inferior de dicas fixa
         if hasattr(self.master, "protocol"):
             self.master.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -281,23 +309,15 @@ class EqInterface:
     #  Construção do Cabeçalho e Gráfico Interativo de Espectro
     # ─────────────────────────────────────────────────────────────────────────
     def _build_header(self) -> None:
-        """Constrói o cabeçalho responsivo com medidor Pico/RMS, Clipping clicável, Bypass Global e Tela Cheia (V07 / F08)."""
+        """Constrói o cabeçalho sem truncamento com badge '● SALVO / ● NÃO SALVO', medidor Pico/RMS, Bypass e Tela Cheia (D02)."""
         self.header_frame = tk.Frame(self.master, bg=C_PRETO)
         self.header_frame.grid(row=0, column=0, sticky="ew")
         if hasattr(self.header_frame, "columnconfigure"):
             self.header_frame.columnconfigure(0, weight=1)
 
-        self.title_label = tk.Label(
-            self.header_frame,
-            text="🎚️ SELVAEQ — EQUALIZADOR 24 BANDAS (DUPLO CLIQUE: CRIAR/RESETAR | ARRASTAR: EDITAR | BOTÃO DIREITO: EXCLUIR)",
-            font=F_BEBAS,
-            bg=C_PRETO,
-            fg=C_AMARELO,
-        )
-        self.title_label.pack(side="left", padx=14, pady=6)
-
+        # D02: Empacota right_hdr ANTES de left_hdr para nunca cortar o botão "⛶ Tela Cheia (F11)"
         right_hdr = tk.Frame(self.header_frame, bg=C_PRETO)
-        right_hdr.pack(side="right", padx=14, pady=4)
+        right_hdr.pack(side="right", padx=12, pady=4)
 
         self.fullscreen_btn = _styled_button(
             right_hdr, "⛶ Tela Cheia (F11)", self.toggle_fullscreen, accent=C_AZUL
@@ -314,7 +334,7 @@ class EqInterface:
             text="● CLIP: OK (-∞ dBFS)",
             font=F_SPACE,
             bg=C_PRETO,
-            fg=C_VERDE,
+            fg=C_VERDE_CLARO,
             cursor="hand2",
         )
         self.clip_label.pack(side="right", padx=6)
@@ -332,27 +352,55 @@ class EqInterface:
         self.meter_canvas.pack(side="right", padx=(4, 4))
         self.meter_canvas.bind("<Button-1>", lambda e: self.reset_clip_indicator())
 
+        left_hdr = tk.Frame(self.header_frame, bg=C_PRETO)
+        left_hdr.pack(side="left", fill="x", expand=True, padx=12, pady=4)
+
+        self.title_label = tk.Label(
+            left_hdr,
+            text="🎚 SELVAEQ — EQUALIZADOR PARAMÉTRICO 24 BANDAS",
+            font=F_BEBAS,
+            bg=C_PRETO,
+            fg=C_AMARELO,
+        )
+        self.title_label.pack(side="left")
+
+        self.dirty_badge_label = tk.Label(
+            left_hdr,
+            text="● SALVO",
+            font=F_SPACE,
+            bg=C_BG3,
+            fg=C_TEXTO2,
+            padx=8,
+            pady=2,
+            highlightthickness=1,
+            highlightbackground=C_MARROM,
+        )
+        self.dirty_badge_label.pack(side="left", padx=(10, 0))
+        self._update_window_title()
+
     def reset_clip_indicator(self) -> None:
         """Reseta a trava temporal de clipping no `AudioIO` e atualiza o cabeçalho (V07 / T08)."""
         self.io.reset_clip()
         self.show_clip_indicator(False)
 
     def _build_curve_area(self) -> None:
-        """Constrói a área responsiva do gráfico espectral logarítmico (20 Hz - 20 kHz)."""
+        """Constrói a área responsiva do gráfico espectral logarítmico sem faixa branca (D01 / D04)."""
         self.curve_container = tk.Frame(self.master, bg=C_PRETO, highlightthickness=1, highlightbackground=C_MARROM)
-        self.curve_container.grid(row=1, column=0, sticky="nsew", padx=14, pady=(4, 4))
+        self.curve_container.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 4))
         if hasattr(self.curve_container, "columnconfigure"):
             self.curve_container.columnconfigure(0, weight=1)
             self.curve_container.rowconfigure(0, weight=1)
 
         self.fig, self.ax = plt.subplots(figsize=(9.5, 3.6), facecolor=C_PRETO)
+        self.fig.patch.set_facecolor(C_PRETO)
         self.fig.subplots_adjust(left=0.06, right=0.93, top=0.93, bottom=0.14)
         self.draw_log_axes()
 
         if HAS_TK and FigureCanvasTkAgg is not None:
             self.canvas_mpl = FigureCanvasTkAgg(self.fig, master=self.curve_container)
             tk_wid = self.canvas_mpl.get_tk_widget()
-            tk_wid.pack(fill="both", expand=True, padx=2, pady=2)
+            tk_wid.configure(bg=C_PRETO, highlightthickness=0)
+            tk_wid.pack(fill="both", expand=True, padx=0, pady=0)
             tk_wid.bind("<Configure>", self._on_curve_canvas_resize)
             self.fig.canvas.mpl_connect("button_press_event", self._on_mpl_mouse_down)
             self.fig.canvas.mpl_connect("motion_notify_event", self._on_mpl_mouse_drag)
@@ -362,37 +410,72 @@ class EqInterface:
             self.canvas_mpl = None
 
     def _on_curve_canvas_resize(self, event) -> None:
-        """Adapta as dimensões do controlador da curva quando a janela é redimensionada ou vai para tela cheia."""
-        w = getattr(event, "width", 900)
-        h = getattr(event, "height", 340)
-        if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 100 and h > 80:
-            self.curve_controller.set_canvas_size(float(w), float(h))
+        """Agenda com debounce de 60 ms o redimensionamento real da `Figure` Matplotlib (D01)."""
+        w = int(getattr(event, "width", 0) or 0)
+        h = int(getattr(event, "height", 0) or 0)
+        if w < 120 or h < 90:
+            return
+        self.curve_controller.set_canvas_size(float(w), float(h))
+        if self._resize_job is not None and hasattr(self.master, "after_cancel"):
+            try:
+                self.master.after_cancel(self._resize_job)
+            except Exception:
+                pass
+            self._resize_job = None
+        if HAS_TK and hasattr(self.master, "after"):
+            self._resize_job = self.master.after(60, lambda: self._apply_figure_resize(w, h))
+        else:
+            self._apply_figure_resize(w, h)
+
+    def _apply_figure_resize(self, width_px: int, height_px: int) -> None:
+        """Aplica as novas dimensões em polegadas e margens proporcionais à `Figure` Matplotlib (D01)."""
+        self._resize_job = None
+        if width_px < 120 or height_px < 90:
+            return
+        self.curve_controller.set_canvas_size(float(width_px), float(height_px))
+        dpi = float(self.fig.get_dpi() or 100.0)
+        self.fig.set_size_inches(max(4.0, width_px / dpi), max(1.8, height_px / dpi), forward=False)
+        left_m = max(0.055, min(0.095, 64.0 / max(width_px, 400)))
+        right_m = min(0.945, max(0.905, 1.0 - (64.0 / max(width_px, 400))))
+        bottom_m = max(0.14, min(0.24, 42.0 / max(height_px, 180)))
+        top_m = min(0.94, max(0.88, 1.0 - (18.0 / max(height_px, 180))))
+        self.fig.subplots_adjust(left=left_m, right=right_m, top=top_m, bottom=bottom_m)
+        if self.canvas_mpl is not None:
+            self.canvas_mpl.draw_idle()
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Sistema de Abas (Equalizador | Entrada/Saída | Modo de Teste MP3/WAV)
     # ─────────────────────────────────────────────────────────────────────────
     def _build_tabs_and_panels(self) -> None:
-        """Constrói a barra de abas estilo SelvaSonic e os 3 painéis modulares."""
+        """Constrói a barra de abas com ícones (D07) e `content_area` de altura fixa unificada (D04)."""
         self.tab_bar = tk.Frame(self.master, bg=C_PRETO)
-        self.tab_bar.grid(row=2, column=0, sticky="ew", padx=14)
+        self.tab_bar.grid(row=2, column=0, sticky="ew", padx=12)
 
         tab_container = tk.Frame(self.tab_bar, bg=C_PRETO)
         tab_container.pack(side="left", pady=(2, 0))
 
         tabs_info = [
-            ("bands", "1. Equalizador & Bandas"),
-            ("io", "2. Entrada & Saída de Áudio"),
-            ("test", "3. Modo de Teste (MP3 / WAV)"),
+            ("bands", "🎚 1. Equalizador & Bandas"),
+            ("io", "🔌 2. Entrada & Saída de Áudio"),
+            ("test", "▶ 3. Modo de Teste (MP3 / WAV)"),
         ]
 
         for tab_id, text in tabs_info:
-            btn = tk.Canvas(tab_container, width=215, height=30, bg=C_PRETO, highlightthickness=0, cursor="hand2")
+            btn = tk.Canvas(tab_container, width=235, height=30, bg=C_PRETO, highlightthickness=0, cursor="hand2")
             btn.pack(side="left", padx=2)
             btn.bind("<Button-1>", lambda e, tid=tab_id: self.select_tab(tid))
             self.tab_buttons[tab_id] = {"canvas": btn, "text": text}
 
-        self.content_area = tk.Frame(self.master, bg=C_BG2, highlightthickness=1, highlightbackground=C_AMARELO)
-        self.content_area.grid(row=3, column=0, sticky="nsew", padx=14, pady=(0, 4))
+        self.content_area = tk.Frame(
+            self.master,
+            bg=C_BG2,
+            height=235,
+            highlightthickness=1,
+            highlightbackground=C_AMARELO,
+        )
+        self.content_area.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 4))
+        self.content_area.pack_propagate(False)
+        self.content_area.grid_propagate(False)
         if hasattr(self.content_area, "columnconfigure"):
             self.content_area.columnconfigure(0, weight=1)
             self.content_area.rowconfigure(0, weight=1)
@@ -403,7 +486,7 @@ class EqInterface:
         self.select_tab("bands")
 
     def select_tab(self, tab_id: str) -> None:
-        """Alterna entre as abas 'bands', 'io' e 'test'."""
+        """Alterna entre as abas 'bands', 'io' e 'test' com alto contraste nas abas inativas (D07)."""
         if tab_id not in self.panels:
             return
         self.current_tab = tab_id
@@ -411,13 +494,13 @@ class EqInterface:
             c = data["canvas"]
             text = data["text"]
             c.delete("all")
-            pts = [6, 0, 215, 0, 209, 30, 0, 30]
+            pts = [6, 0, 235, 0, 229, 30, 0, 30]
             if tid == tab_id:
                 c.create_polygon(pts, fill=C_AMARELO, outline="")
-                c.create_text(107, 15, text=text.upper(), font=F_BARLOW, fill=C_PRETO)
+                c.create_text(117, 15, text=text.upper(), font=F_BARLOW, fill=C_PRETO)
             else:
-                c.create_polygon(pts, fill=C_BG2, outline=C_MARROM)
-                c.create_text(107, 15, text=text.upper(), font=F_BARLOW, fill=C_TEXTO2)
+                c.create_polygon(pts, fill=C_BG3, outline=C_MARROM)
+                c.create_text(117, 15, text=text.upper(), font=F_BARLOW, fill=C_TEXTO)
 
         for tid, panel_frame in self.panels.items():
             if tid == tab_id:
@@ -519,16 +602,46 @@ class EqInterface:
         )
 
     def _build_footer(self) -> None:
-        """Constrói o rodapé informativo com dicas de interação no gráfico."""
+        """Constrói o rodapé informativo com dicas contextuais dinâmicas de interação no gráfico (D05)."""
         self.footer = tk.Frame(self.master, bg=C_PRETO, highlightthickness=1, highlightbackground=C_VERDE)
-        self.footer.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 8))
-        tk.Label(
+        self.footer.grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 8))
+        self.footer_label = tk.Label(
             self.footer,
-            text="💡 GRÁFICO INTERATIVO: Duplo Clique Vazio = Criar | Duplo Clique Nó = 0 dB | Arrastar = Freq/Ganho | Scroll = Q | Alt+Clique = Solo | Botão Direito/Del = Excluir",
+            text="",
             font=F_SPACE,
             bg=C_PRETO,
             fg=C_TEXTO2,
-        ).pack(side="left", padx=10, pady=3)
+        )
+        self.footer_label.pack(side="left", padx=10, pady=3)
+        self._set_footer_hint("idle")
+
+    def _set_footer_hint(self, mode: str = "idle", band_idx: Optional[int] = None) -> None:
+        """Atualiza `self.footer_label` dinamicamente conforme o estado do mouse sobre o gráfico (D05)."""
+        if getattr(self, "footer_label", None) is None:
+            return
+        if mode == "dragging" and band_idx is not None:
+            text = (
+                f"🎚 ARRASTANDO BANDA {int(band_idx) + 1:02d}: "
+                "Mova para ajustar Frequência/Ganho | Solte o mouse para registrar no Undo/Redo"
+            )
+            fg = C_AMARELO
+        elif mode == "hover" and band_idx is not None:
+            text = (
+                f"💡 NÓ BANDA {int(band_idx) + 1:02d}: "
+                "Arrastar = Freq/Ganho | Duplo Clique = Resetar 0 dB | Roda do Mouse = Fator Q | "
+                "Alt+Clique = Solo | Ctrl+Clique = Bypass | Botão Direito = Excluir"
+            )
+            fg = C_TEXTO
+        else:
+            text = (
+                "💡 DICAS: Duplo Clique Vazio (ou Shift+Clique) = Criar Banda | "
+                "Passe o mouse sobre um ponto (1–24) para ver os comandos de edição | Ctrl+Z/Y = Undo/Redo"
+            )
+            fg = C_TEXTO2
+        try:
+            self.footer_label.config(text=text, fg=fg)
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Criação, Edição e Exclusão de Bandas via Gráfico de Espectro (PB04 / PB21)
@@ -686,12 +799,14 @@ class EqInterface:
                 self.curve_controller.dragging_index = hit_idx
                 self.nodes[hit_idx].drag_to_acoustic(click_freq, click_gain)
                 self._update_hover_hud(hit_idx)
+                self._set_footer_hint("dragging", hit_idx)
             self._sync_controls_from_selected_band()
 
     def _on_mpl_mouse_drag(self, event) -> None:
         coords = self._extract_event_coords(event)
         if coords is None:
             self._update_hover_hud(None)
+            self._set_footer_hint("idle")
             return
         freq, gain = coords
         drag_idx = self.curve_controller.dragging_index
@@ -699,17 +814,23 @@ class EqInterface:
             if 0 <= drag_idx < len(self.nodes):
                 self.nodes[drag_idx].drag_to_acoustic(freq, gain)
                 self._update_hover_hud(drag_idx)
+                self._set_footer_hint("dragging", drag_idx)
                 self._sync_controls_from_selected_band()
             return
 
         near_idx = self.curve_controller.find_closest_node(freq, gain, max_oct_dist=0.45)
         self._update_hover_hud(near_idx)
+        if near_idx is not None:
+            self._set_footer_hint("hover", near_idx)
+        else:
+            self._set_footer_hint("idle")
 
     def _on_mpl_mouse_up(self, event) -> None:
         if self.curve_controller.dragging_index is not None:
             self.engine.state_controller.commit()
             self.curve_controller.dragging_index = None
             self._update_window_title()
+        self._set_footer_hint("idle")
 
     def _on_mpl_scroll(self, event) -> None:
         coords = self._extract_event_coords(event)
@@ -743,6 +864,8 @@ class EqInterface:
         self.nodes_bypass_line = None
         self.nodes_solo_line = None
         self.selected_node_line = None
+        self.legend = None
+        self._legend_has_spectrum = False
         self.hover_hud = self.ax.annotate(
             "",
             xy=(1000.0, 0.0),
@@ -757,8 +880,9 @@ class EqInterface:
 
     def draw_log_axes(self) -> None:
         """
-        Configura o eixo X logarítmico formatado (`20..20k`), eixo Y em dB (`-24..+24 dB`)
-        e eixo secundário `ax_fft` em dBFS (`-96..0 dBFS`) (PB19 / V03).
+        Configura o eixo X logarítmico (`20..20k`) apenas com 'Frequência (Hz)' (D05),
+        eixo Y em dB (`-24..+24 dB`), eixo secundário `ax_fft` em dBFS (`-96..0 dBFS`) e
+        linhas verticais de década em 100 Hz, 1k e 10k com alto contraste (D06).
         """
         self.ax.set_facecolor(C_PRETO)
         self.ax.set_xscale("log")
@@ -773,29 +897,41 @@ class EqInterface:
 
         self.ax.axhline(0.0, color="#444444", lw=0.9, ls="--")
         self.ax.grid(True, which="both", color="#222222", lw=0.6)
-        self.ax.set_xlabel(
-            "Frequência (Hz) — Duplo Clique: Criar/Resetar | Arrastar: Mover | Scroll: Q | Botão Direito: Excluir",
-            color=C_TEXTO2,
-            fontsize=8.5,
-        )
-        self.ax.set_ylabel("Ganho (dB)", color=C_TEXTO2, fontsize=9)
-        self.ax.tick_params(colors=C_TEXTO2, labelsize=8)
+        for f_dec in (100.0, 1000.0, 10000.0):
+            self.ax.axvline(f_dec, color="#2E2E2E", lw=0.95, ls="-", zorder=1)
+
+        self.ax.set_xlabel("Frequência (Hz)", color=C_EIXO, fontsize=9.5)
+        self.ax.set_ylabel("Ganho (dB)", color=C_EIXO, fontsize=9.5)
+        self.ax.tick_params(colors=C_EIXO, labelsize=8.5)
 
         if self.ax_fft is None:
             self.ax_fft = self.ax.twinx()
         self.ax_fft.set_ylim(-96.0, 0.0)
         self.ax_fft.set_yticks([-96, -72, -48, -24, 0])
-        self.ax_fft.set_ylabel("FFT (dBFS)", color=C_VERDE, fontsize=8.5)
-        self.ax_fft.tick_params(colors=C_VERDE, labelsize=7.5)
+        self.ax_fft.set_ylabel("FFT (dBFS)", color=C_VERDE_CLARO, fontsize=9.5)
+        self.ax_fft.tick_params(colors=C_VERDE_CLARO, labelsize=8.5)
+
+    def _ensure_legend(self) -> None:
+        """Cria ou atualiza a legenda compacta do gráfico (D06)."""
+        self.legend = self.ax.legend(
+            loc="upper right",
+            facecolor=C_BG2,
+            edgecolor=C_MARROM,
+            labelcolor=C_TEXTO,
+            fontsize=7.5,
+            framealpha=0.85,
+        )
 
     def draw_theoretical_curve(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Calcula e plota a curva teórica global, preenchimento translúcido (V03),
-        curva individual da banda selecionada (V05) e nós numerados (PB09 / V04).
+        Calcula e plota a curva teórica global, preenchimento translúcido suave (`alpha=0.06` - D06),
+        curva individual da banda selecionada (V05), legenda (D06) e nós numerados (PB09 / V04).
         """
         freqs, mag_db = self.engine.global_response(n=512)
         if self.curve_line is None:
-            (self.curve_line,) = self.ax.plot(freqs, mag_db, color=C_AMARELO, lw=2.2, zorder=4, label="Curva EQ (dB)")
+            (self.curve_line,) = self.ax.plot(
+                freqs, mag_db, color=C_AMARELO, lw=2.2, zorder=4, label="Curva EQ (Ativa)"
+            )
         else:
             self.curve_line.set_xdata(freqs)
             self.curve_line.set_ydata(mag_db)
@@ -805,9 +941,9 @@ class EqInterface:
                 self._curve_fill.remove()
             except Exception:
                 pass
-        self._curve_fill = self.ax.fill_between(freqs, 0.0, mag_db, color=C_AMARELO, alpha=0.10, zorder=3)
+        self._curve_fill = self.ax.fill_between(freqs, 0.0, mag_db, color=C_AMARELO, alpha=0.06, zorder=3)
 
-        # Curva individual da banda selecionada (V05)
+        # Curva individual da banda selecionada (V05 / D06)
         if (
             not self.config.bypass
             and 0 <= self.selected_band_index < len(self.engine.bands)
@@ -818,14 +954,36 @@ class EqInterface:
             sb_db = BiquadMath.combined_response([sb], fs=effective_fs, n=len(freqs), freqs=freqs)
             if self.selected_band_curve_line is None:
                 (self.selected_band_curve_line,) = self.ax.plot(
-                    freqs, sb_db, color="#38BDF8", lw=1.2, ls="--", alpha=0.75, zorder=3.5
+                    freqs,
+                    sb_db,
+                    color="#38BDF8",
+                    lw=1.2,
+                    ls="--",
+                    alpha=0.75,
+                    zorder=3.5,
+                    label="Banda Selecionada (Ref.)",
                 )
             else:
                 self.selected_band_curve_line.set_xdata(freqs)
                 self.selected_band_curve_line.set_ydata(sb_db)
-        elif self.selected_band_curve_line is not None:
-            self.selected_band_curve_line.set_xdata([])
-            self.selected_band_curve_line.set_ydata([])
+        else:
+            if self.selected_band_curve_line is None:
+                (self.selected_band_curve_line,) = self.ax.plot(
+                    [],
+                    [],
+                    color="#38BDF8",
+                    lw=1.2,
+                    ls="--",
+                    alpha=0.75,
+                    zorder=3.5,
+                    label="Banda Selecionada (Ref.)",
+                )
+            else:
+                self.selected_band_curve_line.set_xdata([])
+                self.selected_band_curve_line.set_ydata([])
+
+        if self.legend is None:
+            self._ensure_legend()
 
         act_f = [b.freq_hz for b in self.engine.bands if not b.bypass]
         act_g = [b.gain_db for b in self.engine.bands if not b.bypass]
@@ -905,7 +1063,7 @@ class EqInterface:
         return freqs, mag_db
 
     def draw_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Obtém o espectro FFT e o envelope Peak Hold em dBFS do `SpectrumFFT` e plota no gráfico (PB07/PB08/F14)."""
+        """Obtém o espectro FFT e o envelope Peak Hold em dBFS do `SpectrumFFT` e plota no gráfico (PB07/PB08/F14/D06)."""
         freqs, spec_db = self.analyzer.spectrum_curve(min_db=-96.0)
         _, peak_db = self.analyzer.peak_hold_curve(min_db=-96.0)
         mapped_db = (spec_db + 48.0) * 0.5
@@ -913,15 +1071,20 @@ class EqInterface:
         valid = freqs >= 20.0
         if self.spectrum_line is None:
             (self.spectrum_line,) = self.ax.plot(
-                freqs[valid], mapped_db[valid], color=C_VERDE, lw=1.1, alpha=0.75, zorder=2, label="Espectro FFT"
+                freqs[valid], mapped_db[valid], color=C_VERDE_CLARO, lw=1.1, alpha=0.80, zorder=2, label="Espectro FFT"
             )
+            self._ensure_legend()
+            self._legend_has_spectrum = True
         else:
             self.spectrum_line.set_xdata(freqs[valid])
             self.spectrum_line.set_ydata(mapped_db[valid])
+            if not getattr(self, "_legend_has_spectrum", False):
+                self._ensure_legend()
+                self._legend_has_spectrum = True
 
         if self.peak_hold_line is None:
             (self.peak_hold_line,) = self.ax.plot(
-                freqs[valid], mapped_peak[valid], color=C_VERDE, lw=0.7, ls=":", alpha=0.45, zorder=2
+                freqs[valid], mapped_peak[valid], color=C_VERDE_CLARO, lw=0.7, ls=":", alpha=0.45, zorder=2
             )
         else:
             self.peak_hold_line.set_xdata(freqs[valid])
@@ -939,7 +1102,7 @@ class EqInterface:
     def show_clip_indicator(self, state: bool) -> None:
         """
         Atualiza o indicador visual de Clipping (> 0 dBFS), barra de nível Pico/RMS (V07),
-        status do stream e posição em tempo real do player (PB20 / V10 / F09).
+        LED colorido de status do stream (D09) e posição `pos / dur` em tempo real do player (D10).
         """
         self.clip_indicator_state = bool(state)
         peak_db = float(self.io.last_peak_dbfs)
@@ -949,7 +1112,7 @@ class EqInterface:
         if self.clip_indicator_state:
             self.clip_label.config(text=f"⚠ CLIP! ({peak_str}) | {src_str}", fg=C_VERMELHO)
         else:
-            self.clip_label.config(text=f"● {src_str} ({peak_str})", fg=C_VERDE)
+            self.clip_label.config(text=f"● {src_str} ({peak_str})", fg=C_VERDE_CLARO)
 
         if hasattr(self, "meter_canvas") and self.meter_canvas is not None:
             try:
@@ -958,15 +1121,31 @@ class EqInterface:
                 bar_col = (
                     C_VERMELHO
                     if (self.clip_indicator_state or peak_db > 0.0)
-                    else (C_AMARELO if peak_db >= -6.0 else C_VERDE)
+                    else (C_AMARELO if peak_db >= -6.0 else C_VERDE_CLARO)
                 )
                 self.meter_canvas.create_rectangle(0, 0, int(110 * ratio), 14, fill=bar_col, outline="")
             except Exception:
                 pass
 
+        # D09: LED colorido para status do stream na Aba 2
         if hasattr(self, "io_widgets") and "io_status_label" in self.io_widgets:
-            self.io_widgets["io_status_label"].config(text=f"Stream: {self.io.stream_mode}")
+            if getattr(self.io, "last_stream_error", ""):
+                self.io_widgets["io_status_label"].config(
+                    text=f"✖ Stream Erro: {self.io.stream_mode}",
+                    fg=C_VERMELHO,
+                )
+            elif "Simulado" in str(self.io.stream_mode):
+                self.io_widgets["io_status_label"].config(
+                    text=f"● Stream: {self.io.stream_mode}",
+                    fg=C_AMARELO,
+                )
+            else:
+                self.io_widgets["io_status_label"].config(
+                    text=f"● Stream Ativo: {self.io.stream_mode}",
+                    fg=C_VERDE_CLARO,
+                )
 
+        # D10: Atualização contextual de media_info_label e seek_label (pos / dur) na Aba 3
         if hasattr(self, "test_widgets") and "media_info_label" in self.test_widgets:
             ms = self.io.media_streamer
             if "play_btn" in self.test_widgets and hasattr(self.test_widgets["play_btn"], "set_active"):
@@ -983,14 +1162,22 @@ class EqInterface:
                 pos_fmt = self._format_time_mmss(pos_s)
                 dur_fmt = self._format_time_mmss(dur_s)
                 self.test_widgets["media_info_label"].config(
-                    text=f"{state_icon} {fname} | {pos_fmt} / {dur_fmt} (SR: {self.config.sample_rate}Hz)"
+                    text=f"{state_icon} {fname} | {pos_fmt} / {dur_fmt} (SR: {self.config.sample_rate}Hz)",
+                    fg=C_AMARELO,
                 )
                 seek_sl = self.test_widgets.get("seek_slider")
                 if seek_sl is not None and not getattr(seek_sl, "is_dragging", False):
                     seek_sl.to_ = max(1.0, dur_s)
                     seek_sl.set(pos_s)
-                    if "seek_label" in self.test_widgets:
-                        self.test_widgets["seek_label"].config(text=f"{pos_s:.1f} s")
+                if "seek_label" in self.test_widgets:
+                    self.test_widgets["seek_label"].config(text=f"{pos_s:.1f}s / {dur_s:.1f}s")
+            else:
+                self.test_widgets["media_info_label"].config(
+                    text="Arquivo: Nenhum MP3/WAV carregado (Usando Gerador em Tempo Real)",
+                    fg=C_TEXTO2,
+                )
+                if "seek_label" in self.test_widgets:
+                    self.test_widgets["seek_label"].config(text="0.0s / 0.0s")
 
     def update_visuals(self) -> None:
         """Consome todos os blocos pendentes da `visual_queue` em ordem FIFO (T10), alimenta o `SpectrumFFT` e redesenha a UI."""
@@ -1030,7 +1217,8 @@ class EqInterface:
     def _sync_controls_from_selected_band(self) -> None:
         """
         Atualiza os controles da Aba 1 para refletir a banda selecionada no gráfico,
-        incluindo habilitação contextual de Ganho/Slope (V09) e estados visuais de botões (V08).
+        incluindo habilitação contextual de Ganho/Slope (V09), rótulo curto A/B (D03)
+        e botão Mid/Side: ON/OFF (D09).
         """
         self._update_window_title()
         try:
@@ -1045,11 +1233,14 @@ class EqInterface:
         if hasattr(self, "io_widgets"):
             if "ms_btn" in self.io_widgets and hasattr(self.io_widgets["ms_btn"], "set_active"):
                 self.io_widgets["ms_btn"].set_active(self.config.ms_enabled)
+                self.io_widgets["ms_btn"].set_text(
+                    "🔀 Mid/Side: ON" if self.config.ms_enabled else "🔀 Mid/Side: OFF"
+                )
             if "mute_btn" in self.io_widgets and hasattr(self.io_widgets["mute_btn"], "set_active"):
                 self.io_widgets["mute_btn"].set_active(self.io.muted)
         if self.band_widgets.get("ab_btn") is not None:
             slot = self.engine.state_controller.active_slot
-            self.band_widgets["ab_btn"].set_text(f"⇄ A/B (Slot {slot})")
+            self.band_widgets["ab_btn"].set_text(f"⇄ A/B: Slot {slot}")
             self.band_widgets["ab_btn"].set_active(slot == "B")
 
         if not (0 <= self.selected_band_index < len(self.engine.bands)):
@@ -1255,6 +1446,9 @@ class EqInterface:
         res = self._transact("Matriz Mid/Side Global", _do)
         if "ms_btn" in self.io_widgets and hasattr(self.io_widgets["ms_btn"], "set_active"):
             self.io_widgets["ms_btn"].set_active(self.config.ms_enabled)
+            self.io_widgets["ms_btn"].set_text(
+                "🔀 Mid/Side: ON" if self.config.ms_enabled else "🔀 Mid/Side: OFF"
+            )
         return res
 
     def toggle_mute(self) -> bool:
@@ -1360,9 +1554,12 @@ class EqInterface:
         if path:
             try:
                 self.io.load_media_file(path)
-                dur = max(1.0, self.io.media_streamer.get_duration_seconds())
+                dur_raw = self.io.media_streamer.get_duration_seconds()
+                dur = max(1.0, dur_raw)
                 self.test_widgets["seek_slider"].to_ = dur
                 self.test_widgets["seek_slider"].set(0.0)
+                if "seek_label" in self.test_widgets:
+                    self.test_widgets["seek_label"].config(text=f"0.0s / {dur_raw:.1f}s")
                 self.test_widgets["source_combo"].set(InputSource.MEDIA_FILE.name)
                 return path
             except Exception as e:
@@ -1393,7 +1590,11 @@ class EqInterface:
         self.io.stop_media()
         self.test_widgets["seek_slider"].set(0.0)
         if "seek_label" in self.test_widgets:
-            self.test_widgets["seek_label"].config(text="0.0 s")
+            ms = self.io.media_streamer
+            if ms.has_file():
+                self.test_widgets["seek_label"].config(text=f"0.0s / {ms.get_duration_seconds():.1f}s")
+            else:
+                self.test_widgets["seek_label"].config(text="0.0s / 0.0s")
         if "play_btn" in self.test_widgets and hasattr(self.test_widgets["play_btn"], "set_active"):
             self.test_widgets["play_btn"].set_active(False)
 
@@ -1407,6 +1608,10 @@ class EqInterface:
 
     def seek_media_position(self, seconds: float) -> None:
         self.io.seek_media(float(seconds))
+        if "seek_label" in self.test_widgets:
+            ms = self.io.media_streamer
+            dur_s = ms.get_duration_seconds() if ms.has_file() else 0.0
+            self.test_widgets["seek_label"].config(text=f"{float(seconds):.1f}s / {dur_s:.1f}s")
 
     def update_test_source_gain(self, val: float) -> None:
         self.io.media_streamer.set_gain(float(val))
@@ -1446,6 +1651,12 @@ class EqInterface:
 
     def on_close(self) -> None:
         """Encerra o stream, fecha a janela e executa a limpeza de cache (`cleancache.py`)."""
+        if self._resize_job is not None and hasattr(self.master, "after_cancel"):
+            try:
+                self.master.after_cancel(self._resize_job)
+            except Exception:
+                pass
+            self._resize_job = None
         if self.visual_update_id and hasattr(self.master, "after_cancel"):
             self.master.after_cancel(self.visual_update_id)
             self.visual_update_id = None

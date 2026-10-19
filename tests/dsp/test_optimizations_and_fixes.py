@@ -1,10 +1,11 @@
 """
-Suíte Expandida de Testes Unitários e de Regressão (`T16` - `tests/dsp/test_optimizations_and_fixes.py`).
+Suíte Expandida de Testes Unitários e de Regressão (`T16` / `D11` - `tests/dsp/test_optimizations_and_fixes.py`).
 
-Valida deterministicamente todas as correções, melhorias e otimizações das 3 frentes:
+Valida deterministicamente todas as correções, melhorias e otimizações das 4 frentes:
 - Frente C (Otimizações Técnicas): `T01` a `T15`
 - Frente B (Melhorias Funcionais): `F01` a `F16`
 - Frente A (Melhorias Visuais e Stubs Headless): `V01` a `V10`
+- Frente D (Refinamento Visual e UX do Designer): `D01` a `D11`
 """
 
 import math
@@ -31,6 +32,10 @@ from eq.ui.widgets import (
     resolve_font_family,
     get_ui_fonts,
     tk,
+    C_EIXO,
+    C_VERDE_CLARO,
+    C_AMARELO,
+    C_TEXTO2,
 )
 from eq.ui.interface import EqInterface
 
@@ -54,7 +59,7 @@ class _DummyMplEvent:
 
 
 class TestOptimizationsAndFixes(unittest.TestCase):
-    """Cobre os itens T01–T16, F01–F16 e V01–V10 do roteiro técnico do SelvaEQ."""
+    """Cobre os itens T01–T16, F01–F16, V01–V10 e D01–D11 do roteiro técnico do SelvaEQ."""
 
     def test_t01_concurrent_ui_and_audio_thread_safety(self):
         """
@@ -483,6 +488,84 @@ class TestOptimizationsAndFixes(unittest.TestCase):
         fonts = get_ui_fonts(root)
         self.assertIn("F_SPACE", fonts)
         self.assertTrue(isinstance(resolve_font_family(["Space Mono", "DejaVu Sans Mono"]), str))
+
+        ui.on_close()
+
+    def test_d01_to_d11_designer_visual_improvements(self):
+        """
+        D01–D11: Valida redimensionamento real da Figure Matplotlib (`_apply_figure_resize`),
+        badge de estado salvo (`dirty_badge_label`), rótulo limpo do eixo X, fill suave (`alpha=0.06`),
+        legenda do gráfico, barra inferior contextual (`_set_footer_hint`), botões concisos A/B e
+        Mid/Side ON/OFF, e tipografia de 14 pt.
+        """
+        cfg = EqConfig(sample_rate=48000, buffer_size=256)
+        engine = EqEngine(cfg, init_default_bands=True)
+        io = AudioIO(config=cfg, engine=engine)
+        ui = EqInterface(engine=engine, io=io)
+
+        # D01: Redimensionamento real da Figure Matplotlib e atualização do CurveController
+        dpi = float(ui.fig.get_dpi() or 100.0)
+        ui._apply_figure_resize(1200, 450)
+        w_in, h_in = ui.fig.get_size_inches()
+        self.assertAlmostEqual(float(w_in), 1200.0 / dpi, places=2)
+        self.assertAlmostEqual(float(h_in), 450.0 / dpi, places=2)
+        self.assertAlmostEqual(ui.curve_controller.canvas_width, 1200.0, places=2)
+        self.assertAlmostEqual(ui.curve_controller.canvas_height, 450.0, places=2)
+
+        # D02: Badge "● SALVO" vs "● NÃO SALVO" e título conciso sem instruções
+        self.assertIsNotNone(ui.dirty_badge_label)
+        self.assertNotIn("DUPLO CLIQUE", str(ui.title_label.cget("text")))
+        self.assertEqual(str(ui.dirty_badge_label.cget("text")), "● SALVO")
+        ui._on_slider_gain(6.0)
+        self.assertTrue(engine.state_controller.dirty)
+        self.assertEqual(str(ui.dirty_badge_label.cget("text")), "● NÃO SALVO")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            preset_path = os.path.join(tmpdir, "d02_check.json")
+            ui.save_preset_dialog(preset_path)
+            self.assertFalse(engine.state_controller.dirty)
+            self.assertEqual(str(ui.dirty_badge_label.cget("text")), "● SALVO")
+
+        # D05 & D06: Eixo X limpo ("Frequência (Hz)"), fill alpha=0.06 e legenda ativa
+        self.assertEqual(ui.ax.get_xlabel(), "Frequência (Hz)")
+        self.assertIsNotNone(ui._curve_fill)
+        self.assertAlmostEqual(float(ui._curve_fill.get_alpha()), 0.06, places=3)
+        self.assertIsNotNone(ui.ax.get_legend())
+        legend_texts = [t.get_text() for t in ui.ax.get_legend().get_texts()]
+        self.assertIn("Curva EQ (Ativa)", legend_texts)
+        self.assertIn("Banda Selecionada (Ref.)", legend_texts)
+        self.assertIn("Espectro FFT", legend_texts)
+
+        # D05: Barra inferior contextual nos modos "idle", "hover" e "dragging"
+        self.assertIsNotNone(ui.footer_label)
+        ui._set_footer_hint("idle")
+        self.assertIn("DICAS", str(ui.footer_label.cget("text")))
+        ui._set_footer_hint("hover", 3)
+        self.assertIn("NÓ BANDA 04", str(ui.footer_label.cget("text")))
+        ui._set_footer_hint("dragging", 3)
+        self.assertIn("ARRASTANDO BANDA 04", str(ui.footer_label.cget("text")))
+        ui._set_footer_hint("idle")
+        self.assertIn("DICAS", str(ui.footer_label.cget("text")))
+
+        # D03 & D09: Texto conciso "⇄ A/B: Slot A/B" e "🔀 Mid/Side: ON/OFF"
+        ab_btn = ui.band_widgets["ab_btn"]
+        self.assertEqual(str(ab_btn._label.cget("text")), "⇄ A/B: SLOT A")
+        ui.ab_compare_action()
+        self.assertEqual(str(ab_btn._label.cget("text")), "⇄ A/B: SLOT B")
+        ui.ab_compare_action()
+        self.assertEqual(str(ab_btn._label.cget("text")), "⇄ A/B: SLOT A")
+
+        ms_btn = ui.io_widgets["ms_btn"]
+        self.assertEqual(str(ms_btn._label.cget("text")), "🔀 MID/SIDE: OFF")
+        ui.toggle_ms_global()
+        self.assertEqual(str(ms_btn._label.cget("text")), "🔀 MID/SIDE: ON")
+        ui.toggle_ms_global()
+        self.assertEqual(str(ms_btn._label.cget("text")), "🔀 MID/SIDE: OFF")
+
+        # D07 & D11: Constantes de alto contraste e fonte de título em 14 pt
+        self.assertEqual(C_EIXO, "#C8C2B0")
+        self.assertEqual(C_VERDE_CLARO, "#4ADE80")
+        fonts = get_ui_fonts(ui.master)
+        self.assertEqual(fonts["F_BEBAS"][1], 14)
 
         ui.on_close()
 
