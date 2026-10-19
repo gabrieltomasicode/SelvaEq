@@ -390,6 +390,7 @@ class EqInterface:
         if hasattr(self.curve_container, "columnconfigure"):
             self.curve_container.columnconfigure(0, weight=1)
             self.curve_container.rowconfigure(0, weight=1)
+        self.curve_container.bind("<Configure>", self._on_curve_canvas_resize)
 
         self.fig, self.ax = plt.subplots(figsize=(9.5, 3.6), facecolor=C_PRETO)
         self.fig.patch.set_facecolor(C_PRETO)
@@ -401,7 +402,6 @@ class EqInterface:
             tk_wid = self.canvas_mpl.get_tk_widget()
             tk_wid.configure(bg=C_PRETO, highlightthickness=0)
             tk_wid.pack(fill="both", expand=True, padx=0, pady=0)
-            tk_wid.bind("<Configure>", self._on_curve_canvas_resize)
             self.fig.canvas.mpl_connect("button_press_event", self._on_mpl_mouse_down)
             self.fig.canvas.mpl_connect("motion_notify_event", self._on_mpl_mouse_drag)
             self.fig.canvas.mpl_connect("button_release_event", self._on_mpl_mouse_up)

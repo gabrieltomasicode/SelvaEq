@@ -511,6 +511,15 @@ class TestOptimizationsAndFixes(unittest.TestCase):
         self.assertAlmostEqual(float(h_in), 450.0 / dpi, places=2)
         self.assertAlmostEqual(ui.curve_controller.canvas_width, 1200.0, places=2)
         self.assertAlmostEqual(ui.curve_controller.canvas_height, 450.0, places=2)
+        self.assertAlmostEqual(1200.0 - ui.ax.get_position().x1 * 1200.0, 66.0, delta=0.1)
+
+        class _GraphResizeEvent:
+            width = 1400
+            height = 500
+
+        ui._on_curve_canvas_resize(_GraphResizeEvent())
+        self.assertAlmostEqual(ui.curve_controller.canvas_width, 1400.0, places=2)
+        self.assertAlmostEqual(ui.curve_controller.canvas_height, 500.0, places=2)
 
         # D02: Badge "● SALVO" vs "● NÃO SALVO" e título conciso sem instruções
         self.assertIsNotNone(ui.dirty_badge_label)
