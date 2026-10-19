@@ -1,0 +1,124 @@
+@startuml atividade_processblock
+'============================================================
+' DIAGRAMA DE ATIVIDADES - Algoritmo interno de um bloco
+' Serve como especificacao de implementacao para PB02/PB05/PB11/PB20
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam activityBorderColor #2F4858
+skinparam activityBackgroundColor #FFFFFF
+skinparam activityDiamondBackgroundColor #FFF6D9
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+
+title Atividades - Um ciclo de processBlock / audio_callback
+
+|#EEF4FB|Entrada|
+start
+:recebe buffer [frames x 2];
+if (status do stream indica xrun?) then (sim)
+  :registra underrun\n(sem print no realtime);
+endif
+
+|#DFF0E4|Preparacao|
+:le parametros atomicos do APVTS;
+note right
+  Leitura sem lock. Se um parametro
+  mudou, apenas o alvo do smoother
+  e atualizado.
+end note
+:envia copia PRE-EQ para a fila de analise;
+
+if (oversampling habilitado?) then (sim)
+  :processSamplesUp() x2 ou x4;
+else (nao)
+endif
+
+if (modo Mid/Side ativo?) then (sim)
+  :M = (L + R) / 2;
+  :S = (L - R) / 2;
+else (nao - L/R)
+endif
+
+|#E3EDF7|Motor de EQ|
+:i = 0;
+while (i < 24 bandas?) is (sim)
+  if (existe alguma banda em solo?) then (sim)
+    if (esta banda esta em solo?) then (nao)
+      :pula a banda;
+      :i = i + 1;
+      note right: PB12
+    else (sim)
+    endif
+  else (nao)
+    if (banda em bypass?) then (sim)
+      if (smoother ainda em transicao?) then (sim)
+        :processa com ganho decrescente;
+        note right: PB16 - evita click
+      else (nao)
+        :pula a banda;
+        :i = i + 1;
+      endif
+    else (nao)
+    endif
+  endif
+
+  :freq = smoother_freq.getNextValue();
+  :gain = smoother_gain.getNextValue();
+  :q    = smoother_q.getNextValue();
+
+  if (algum parametro mudou?) then (sim)
+    :recalcula coeficientes RBJ\npara o sample_rate atual;
+    note right
+      PB05 + PB29: fs entra como
+      argumento, nunca constante.
+    end note
+  else (nao)
+    :reusa coeficientes em cache;
+  endif
+
+  :aplica a cascata de biquads\n(1 a 8 estagios conforme o slope);
+  :preserva o estado zi/zf da banda;
+  :i = i + 1;
+endwhile (nao)
+
+|#FDF0E3|Saida|
+if (modo Mid/Side ativo?) then (sim)
+  :L = M + S;
+  :R = M - S;
+else (nao)
+endif
+
+if (oversampling habilitado?) then (sim)
+  :processSamplesDown() + anti-alias;
+else (nao)
+endif
+
+:aplica ganho de saida;
+:peak = max(abs(buffer));
+
+if (peak > 1.0?) then (sim)
+  :clipDetected = true;
+  note right: PB20
+else (nao)
+  :decai o indicador de clip;
+endif
+
+:envia copia POS-EQ para a fila de analise;
+:escreve no buffer de saida;
+
+|#EEF4FB|Entrada|
+stop
+
+note bottom
+  **Invariantes obrigatorias deste fluxo (PB10, PB26, PB27)**
+  - nenhuma alocacao dinamica
+  - nenhum mutex ou espera
+  - nenhum acesso a arquivo ou log
+  - nenhuma excecao propagada
+  - tempo total menor que a duracao do buffer
+end note
+
+@enduml

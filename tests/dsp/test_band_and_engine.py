@@ -15,6 +15,25 @@ from eq.dsp.utils import ParameterSmoother
 class TestEqBandAndEngine(unittest.TestCase):
     """Valida a operação isolada e conjunta de `EqBand` e `EqEngine`."""
 
+    def test_config_rejects_non_finite_values_and_boolean_sizes(self):
+        for sample_rate in (float("nan"), float("inf"), float("-inf"), True):
+            with self.subTest(sample_rate=sample_rate), self.assertRaises(ValueError):
+                EqConfig(sample_rate=sample_rate)
+
+        for output_gain_db in (float("nan"), float("inf"), float("-inf"), True):
+            with self.subTest(output_gain_db=output_gain_db), self.assertRaises(ValueError):
+                EqConfig(output_gain_db=output_gain_db)
+
+        for config_values in (
+            {"buffer_size": True},
+            {"num_bands": True},
+            {"oversampling": True},
+        ):
+            with self.subTest(config_values=config_values), self.assertRaises(ValueError):
+                EqConfig(**config_values)
+
+        self.assertEqual(EqConfig(sample_rate=44100.5).sample_rate, 44100.5)
+
     def test_state_continuity_across_blocks_no_clicks(self):
         """
         Verifica que o estado contínuo `zi`/`zf` (herdado de `synth/filters.py::apply_filter`)

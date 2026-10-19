@@ -1,0 +1,92 @@
+@startuml pacotes_refatoracao_selvasonic
+'============================================================
+' MAPA DE REFATORACAO: SelvaSonic -> Plugin de EQ
+' Apoia PB31 / PB32 / PB33 (levantamento de requisitos)
+' Arquivos conferidos no repositorio SelvaSonic-main
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam packageBorderColor #7A8B99
+skinparam rectangleBorderColor #2F4858
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+left to right direction
+
+title Mapa de Refatoracao SelvaSonic -> Equalizador\nVerde = reaproveitado | Amarelo = refatorado pesado | Vermelho = descartado
+
+package "SelvaSonicScripts (origem)" <<Frame>> #F7F7F7 {
+
+  package "synth/" <<Frame>> #FFFFFF {
+    rectangle "**audio.py**\naudio_callback()\nvisual_queue = Queue(2)\n91 linhas" as S_AUDIO #C8E6C9
+    rectangle "**synth.py**\nMidiSynth\nsd.OutputStream\n339 linhas" as S_SYNTH #FFF9C4
+    rectangle "**filters.py**\nget_filter_coeffs() @lru_cache\napply_filter() lfilter+zi\napply_modulations()\n163 linhas" as S_FILT #FFF9C4
+    rectangle "**utils.py**\nnote_to_freq, clamp,\nexp_curve, get_time\n76 linhas" as S_UTILS #C8E6C9
+    rectangle "**config.py**\nSynthConfig (dataclass)\nsample_rate, buffer_size\n145 linhas" as S_CFG #FFF9C4
+    rectangle "**file_io.py**\nsave_config / load_config\nenum_to_str\n95 linhas" as S_IO #C8E6C9
+    rectangle "**waveforms.py**" as S_WF #FFCDD2
+    rectangle "**wavetables.py**" as S_WT #FFCDD2
+    rectangle "**voices.py**\nVoiceState, VoiceManager" as S_VOI #FFCDD2
+    rectangle "**envelopes.py**\ncalculate_adsr" as S_ENV #FFCDD2
+    rectangle "**midi.py**\nmidi_callback" as S_MIDI #FFCDD2
+  }
+
+  package "ui/" <<Frame>> #FFFFFF {
+    rectangle "**interface.py**\nFullSynthInterface\nupdate_visuals / after()\nrestart_audio_stream\n673 linhas" as U_IFACE #FFF9C4
+    rectangle "**widgets.py**\nSelvaSlider (tk.Canvas)\n_panel, _make_slider_row\n335 linhas" as U_WID #C8E6C9
+    rectangle "**visuals.py**\ngenerate_static_wave\nupdate_waveform_plot\n145 linhas" as U_VIS #FFF9C4
+    rectangle "**decorators.py**\nvalidate_positive" as U_DEC #C8E6C9
+    rectangle "**controls/filter_controls.py**\nupdate_filter_type/freq/q" as U_FCTRL #FFF9C4
+    rectangle "**controls/** aditive, envelope,\nmodulation, polyphony,\npulse, supersaw" as U_OTHER #FFCDD2
+    rectangle "**keyboard.py**\nKeyboardMIDI" as U_KEY #FFCDD2
+  }
+}
+
+package "Plugin de EQ (destino - Python)" <<Frame>> #EEF4FB {
+  package "eq/dsp/" <<Frame>> #E3EDF7 {
+    rectangle "**biquad_math.py**\nRBJ Cookbook completo\ncascade Butterworth 6-96 dB/oct" as E_MATH
+    rectangle "**band.py**\nEqBand (estado zi por banda)" as E_BAND
+    rectangle "**engine.py**\nEqEngine (24 bandas + M/S)" as E_ENG
+    rectangle "**spectrum.py**\nSpectrumFFT (scipy.fft -> dB)" as E_FFT
+  }
+  package "eq/io/" <<Frame>> #EFEFE6 {
+    rectangle "**audio_io.py**\nAudioIO (sd.Stream duplex)\ndeteccao de clipping" as E_IO
+    rectangle "**preset_io.py**\nsave_preset / load_preset" as E_PRESET
+    rectangle "**config.py**\nEqConfig" as E_CFG
+  }
+  package "eq/ui/" <<Frame>> #F3E9F7 {
+    rectangle "**interface.py**\nEqInterface" as E_IFACE
+    rectangle "**curve_view.py**\nBandNode + drag/drop" as E_CURVE
+    rectangle "**widgets.py**\nSelvaSlider (intacto)" as E_WID
+    rectangle "**controls/band_controls.py**" as E_CTRL
+  }
+}
+
+'------------------------------------------------------------
+' MAPEAMENTO
+'------------------------------------------------------------
+S_FILT  --> E_MATH  : substitui butter() de\nordem fixa pelas equacoes RBJ
+S_FILT  --> E_BAND  : mantem o padrao\nlfilter + zi/zf entre blocos
+S_UTILS --> E_MATH  : clamp / exp_curve\nestendidos
+S_AUDIO --> E_IO    : callback e visual_queue\npreservados; fonte vira mic/WAV
+S_SYNTH --> E_IO    : setup do stream,\nstart/stop, context manager
+S_CFG   --> E_CFG   : mantem sample_rate,\nbuffer_size, validate()
+S_IO    --> E_PRESET : serializacao JSON\nquase intacta
+U_VIS   --> E_FFT   : troca waveform por FFT
+U_IFACE --> E_IFACE : loop after() +\ncanvas matplotlib
+U_IFACE --> E_CURVE
+U_WID   --> E_WID   : reuso direto
+U_DEC   --> E_CFG   : validate_positive
+U_FCTRL --> E_CTRL  : por-banda em vez\nde global
+
+note bottom of S_WF
+  **Descartados**: toda a sintese
+  (geracao de onda, ADSR, vozes,
+  wavetables, MIDI, teclado virtual
+  e os controles de oscilador).
+  O EQ nao gera sinal: ele processa
+  um sinal que ja existe.
+end note
+
+@enduml

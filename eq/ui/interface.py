@@ -26,12 +26,14 @@ Refatorado a partir de `ui/interface.py` (`FullSynthInterface`) do SelvaSonic:
 """
 
 import os
+import logging
 import sys
 import tempfile
 from queue import Empty
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import matplotlib
+from matplotlib.figure import Figure
 
 from eq.config import EqConfig, FilterType, InputSource
 from eq.dsp.biquad_math import BiquadMath
@@ -71,7 +73,6 @@ from eq.ui.widgets import (
 
 if not HAS_TK:
     matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator, FixedFormatter
 
 if HAS_TK:
@@ -81,6 +82,9 @@ else:
     filedialog = None
     messagebox = None
     FigureCanvasTkAgg = None
+
+
+logger = logging.getLogger(__name__)
 
 
 class EqInterface:
@@ -393,7 +397,8 @@ class EqInterface:
             self.curve_container.rowconfigure(0, weight=1)
         self.curve_container.bind("<Configure>", self._on_curve_canvas_resize)
 
-        self.fig, self.ax = plt.subplots(figsize=(9.5, 3.6), facecolor=C_PRETO)
+        self.fig = Figure(figsize=(9.5, 3.6), facecolor=C_PRETO)
+        self.ax = self.fig.add_subplot(111)
         self.fig.patch.set_facecolor(C_PRETO)
         self.fig.subplots_adjust(left=0.06, right=0.93, top=0.93, bottom=0.14)
         self.draw_log_axes()
@@ -944,12 +949,18 @@ class EqInterface:
             self.curve_line.set_xdata(freqs)
             self.curve_line.set_ydata(mag_db)
 
-        if self._curve_fill is not None:
-            try:
-                self._curve_fill.remove()
-            except Exception:
-                pass
-        self._curve_fill = self.ax.fill_between(freqs, 0.0, mag_db, color=C_AMARELO, alpha=0.06, zorder=3)
+        fill_vertices = np.concatenate(
+            (
+                np.column_stack((freqs, mag_db)),
+                np.column_stack((freqs[::-1], np.zeros_like(freqs))),
+            )
+        )
+        if self._curve_fill is None:
+            self._curve_fill = self.ax.fill_between(
+                freqs, 0.0, mag_db, color=C_AMARELO, alpha=0.06, zorder=3
+            )
+        else:
+            self._curve_fill.set_verts([fill_vertices])
 
         # Curva individual da banda selecionada (V05 / D06)
         if (
@@ -1045,28 +1056,31 @@ class EqInterface:
             self.selected_node_line.set_xdata(sel_f)
             self.selected_node_line.set_ydata(sel_g)
 
-        # Numeração dos nós de 1 a 24 (V04)
-        for ann in self._node_annotations:
-            try:
-                ann.remove()
-            except Exception:
-                pass
-        self._node_annotations.clear()
+        # Reaproveita os artistas existentes para evitar churn no gráfico a cada frame.
+        while len(self._node_annotations) > len(self.engine.bands):
+            self._node_annotations.pop().remove()
 
-        for b in self.engine.bands:
-            ann = self.ax.annotate(
-                str(b.index + 1),
-                xy=(b.freq_hz, b.gain_db),
-                xytext=(0, 7),
-                textcoords="offset points",
-                ha="center",
-                va="bottom",
-                color=C_TEXTO if not b.bypass else C_TEXTO2,
-                fontsize=7.5,
-                fontweight="bold",
-                zorder=7,
-            )
-            self._node_annotations.append(ann)
+        for idx, band in enumerate(self.engine.bands):
+            color = C_TEXTO if not band.bypass else C_TEXTO2
+            if idx < len(self._node_annotations):
+                ann = self._node_annotations[idx]
+                ann.xy = (band.freq_hz, band.gain_db)
+                ann.set_text(str(band.index + 1))
+                ann.set_color(color)
+            else:
+                ann = self.ax.annotate(
+                    str(band.index + 1),
+                    xy=(band.freq_hz, band.gain_db),
+                    xytext=(0, 7),
+                    textcoords="offset points",
+                    ha="center",
+                    va="bottom",
+                    color=color,
+                    fontsize=7.5,
+                    fontweight="bold",
+                    zorder=7,
+                )
+                self._node_annotations.append(ann)
 
         return freqs, mag_db
 
@@ -1223,7 +1237,7 @@ class EqInterface:
                 if self.canvas_mpl is not None:
                     self.canvas_mpl.draw_idle()
             except Exception:
-                pass
+                logger.exception("Falha ao atualizar a visualização do equalizador.")
 
         if hasattr(self.master, "after"):
             self.visual_update_id = self.master.after(33, self.update_visuals)
@@ -1690,7 +1704,12 @@ class EqInterface:
             self.visual_update_id = None
         if self.io:
             self.io.stop()
-        plt.close(self.fig)
+        canvas = getattr(self, "canvas_mpl", None)
+        pending_draw_id = getattr(canvas, "_idle_draw_id", None)
+        tk_canvas = getattr(canvas, "_tkcanvas", None)
+        if pending_draw_id is not None and tk_canvas is not None:
+            tk_canvas.after_cancel(pending_draw_id)
+            setattr(canvas, "_idle_draw_id", None)
         if hasattr(self.master, "destroy"):
             self.master.destroy()
         try:

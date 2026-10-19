@@ -8,6 +8,7 @@ Contrato de tipos compartilhado entre a Fase 1 (Python) e a Fase 2 (C++/JUCE).
 
 from dataclasses import dataclass
 from enum import Enum
+import math
 from typing import Optional, Union
 import numpy as np
 
@@ -113,11 +114,26 @@ class EqConfig:
         Raises:
             ValueError: Se algum parâmetro estiver fora dos limites operacionais.
         """
-        if not isinstance(self.sample_rate, (int, float)) or self.sample_rate <= 0:
+        if (
+            not isinstance(self.sample_rate, (int, float))
+            or isinstance(self.sample_rate, bool)
+            or not math.isfinite(self.sample_rate)
+            or self.sample_rate <= 0
+        ):
             raise ValueError(f"sample_rate deve ser maior que 0 (recebido: {self.sample_rate}).")
-        if not isinstance(self.buffer_size, int) or self.buffer_size <= 0:
+        if not isinstance(self.buffer_size, int) or isinstance(self.buffer_size, bool) or self.buffer_size <= 0:
             raise ValueError(f"buffer_size deve ser maior que 0 (recebido: {self.buffer_size}).")
-        if not isinstance(self.num_bands, int) or not (1 <= self.num_bands <= 24):
+        if (
+            not isinstance(self.num_bands, int)
+            or isinstance(self.num_bands, bool)
+            or not (1 <= self.num_bands <= 24)
+        ):
             raise ValueError(f"num_bands deve estar entre 1 e 24 (recebido: {self.num_bands}).")
-        if self.oversampling not in (1, 2, 4):
+        if isinstance(self.oversampling, bool) or self.oversampling not in (1, 2, 4):
             raise ValueError(f"oversampling deve ser 1, 2 ou 4 (recebido: {self.oversampling}).")
+        if (
+            not isinstance(self.output_gain_db, (int, float))
+            or isinstance(self.output_gain_db, bool)
+            or not math.isfinite(self.output_gain_db)
+        ):
+            raise ValueError(f"output_gain_db deve ser um número finito (recebido: {self.output_gain_db}).")

@@ -1,0 +1,562 @@
+@startuml diagrama_classes_eq
+'============================================================
+' PB31 - DIAGRAMA DE CLASSES
+' Plugin de Equalizacao 24 bandas
+' Fase 1: prototipo Python derivado do SelvaSonic (Sprints 1-2)
+' Fase 2: producao nativa C++ / JUCE (Sprints 3-4)
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam ArrowColor #2F4858
+skinparam classBorderColor #2F4858
+skinparam packageBorderColor #7A8B99
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+hide empty members
+
+title PB31 - Diagrama de Classes\nPrototipo Python (refatoracao do SelvaSonic) e Motor Nativo C++/JUCE
+
+'------------------------------------------------------------
+' TIPOS COMPARTILHADOS
+'------------------------------------------------------------
+package "Tipos compartilhados (contrato entre as duas fases)" <<Frame>> #FAFAFA {
+
+  enum FilterType {
+    PEAKING
+    LOW_SHELF
+    HIGH_SHELF
+    LOW_CUT
+    HIGH_CUT
+    BAND_PASS
+    NOTCH
+    ALL_PASS
+  }
+
+  enum ChannelMode {
+    STEREO
+    LEFT
+    RIGHT
+    MID
+    SIDE
+  }
+
+  enum Slope {
+    S6
+    S12
+    S24
+    S48
+    S96
+  }
+}
+
+'============================================================
+' FASE 1 - PROTOTIPO PYTHON
+'============================================================
+package "FASE 1 - Prototipo Python (Sprints 1-2)" <<Frame>> #EEF4FB {
+
+  '---------- NUCLEO DSP: PROIBIDO IMPORTAR UI (PB28) ----------
+  package "eq.dsp  -- sem import de tkinter/matplotlib (PB28)" <<Frame>> #E3EDF7 {
+
+    class EqConfig <<dataclass>> {
+      +sample_rate : int = 44100
+      +buffer_size : int = 512
+      +input_device : Optional[str]
+      +output_device : Optional[str]
+      +num_bands : int = 24
+      +ms_enabled : bool = False
+      +oversampling : int = 1
+      +last_audio_buffer : Optional[ndarray]
+      --
+      +validate() : None
+      +__post_init__() : None
+    }
+    note right of EqConfig
+      REAPROVEITA synth/config.py (SynthConfig).
+      Mantem: sample_rate, buffer_size, validate(),
+      last_audio_buffer.
+      REMOVE: waveform, ADSR, LFO/HFO/FM, polifonia,
+      wavetables, midi_port.
+      PB29: sample_rate e sempre lido daqui,
+      nunca constante no calculo.
+    end note
+
+    class BiquadMath <<module>> {
+      .. RBJ Audio EQ Cookbook (PB05) ..
+      +{static} peaking(fs, f0, gain_db, q) : Coeffs
+      +{static} low_shelf(fs, f0, gain_db, s) : Coeffs
+      +{static} high_shelf(fs, f0, gain_db, s) : Coeffs
+      +{static} low_cut(fs, f0, q) : Coeffs
+      +{static} high_cut(fs, f0, q) : Coeffs
+      +{static} band_pass(fs, f0, q) : Coeffs
+      +{static} notch(fs, f0, q) : Coeffs
+      .. Cascateamento Butterworth 6..96 dB/oct ..
+      +{static} butterworth_q_table(order) : List[float]
+      +{static} cascade(fs, f0, slope, ftype) : List[Coeffs]
+      .. Resposta teorica (PB09) ..
+      +{static} freq_response(coeffs, fs, n=2048) : (w, h)
+      +{static} combined_response(bands, fs) : ndarray
+      -{static} _cached_coeffs(...) : Coeffs
+    }
+    note left of BiquadMath
+      SUBSTITUI synth/filters.py:
+      - get_filter_coeffs() usava scipy butter()
+        de ordem fixa 2; aqui entram as equacoes
+        RBJ completas, vetorizadas com NumPy.
+      - MANTEM o padrao @lru_cache do original
+        para nao recalcular coeficiente por frame.
+      - apply_modulations() e DESCARTADO (era do synth).
+    end note
+
+    class Coeffs <<value object>> {
+      +b0 : float
+      +b1 : float
+      +b2 : float
+      +a1 : float
+      +a2 : float
+      +as_ba() : (ndarray, ndarray)
+    }
+
+    class EqBand {
+      +index : int
+      +freq_hz : float
+      +gain_db : float
+      +q : float
+      +ftype : FilterType
+      +slope : Slope
+      +mode : ChannelMode
+      +bypass : bool
+      +solo : bool
+      --
+      -coeffs : List[Coeffs]
+      -zi : ndarray
+      --
+      +recalculate(fs : int) : None
+      +process(block : ndarray) : ndarray
+      +reset_state() : None
+      +to_dict() : dict
+      +{static} from_dict(d) : EqBand
+    }
+    note bottom of EqBand
+      Herda o padrao de estado continuo de
+      synth/filters.py::apply_filter():
+      guarda zi/zf entre blocos via lfilter_zi
+      para eliminar clicks de descontinuidade.
+      A diferenca: o estado vive na BANDA,
+      nao mais no VoiceState.
+    end note
+
+    class EqEngine {
+      -config : EqConfig
+      -bands : List[EqBand]
+      --
+      +prepare(fs, block_size) : None
+      +process(block : ndarray) : ndarray
+      +add_band(...) : EqBand
+      +remove_band(index : int) : None
+      +set_param(index, name, value) : None
+      +global_response(n=2048) : ndarray
+      +reset_all() : None
+      -_encode_mid_side(lr) : ndarray
+      -_decode_mid_side(ms) : ndarray
+      -_active_bands() : List[EqBand]
+    }
+    note right of EqEngine
+      PB04: lista dimensionada para 24 bandas.
+      PB22: M = (L+R)/2 ; S = (L-R)/2.
+      PB12: _active_bands() resolve solo/bypass.
+    end note
+
+    class AudioIO {
+      +stream : sd.Stream
+      +running : bool
+      +visual_queue : Queue
+      -config : EqConfig
+      -engine : EqEngine
+      --
+      +start() : None
+      +stop() : None
+      +restart_stream() : None
+      +audio_callback(indata, outdata, frames, time, status)
+      +peak_dbfs(block) : float
+      +is_clipping(block) : bool
+      +__enter__() / __exit__()
+    }
+    note left of AudioIO
+      REAPROVEITA synth/synth.py (MidiSynth) +
+      synth/audio.py (audio_callback):
+      - sd.OutputStream vira sd.Stream (duplex):
+        a fonte deixa de ser generate_wave()
+        e passa a ser mic / WAV (PB01, PB02).
+      - visual_queue (Queue maxsize=2) do original
+        e MANTIDA: ja e o padrao produtor/consumidor
+        que vira LockFreeQueue no C++.
+      - np.tanh() de soft clip vira detector de
+        pico > 0 dBFS (PB20).
+      - midi_callback e VoiceManager: REMOVIDOS.
+    end note
+
+    class SpectrumFFT {
+      -fft_size : int
+      -window : ndarray
+      -ring : ndarray
+      --
+      +push_block(block : ndarray) : None
+      +magnitudes_db() : ndarray
+      +bin_to_hz(bin : int) : float
+      +set_smoothing(alpha : float) : None
+      -_apply_window(frame) : ndarray
+    }
+    note right of SpectrumFFT
+      SUBSTITUI ui/visuals.py:
+      - generate_static_wave() e DESCARTADA
+        (dependia de WaveType e wavetables).
+      - o consumo de blocos da visual_queue e
+        a plotagem matplotlib sao MANTIDOS;
+        entra scipy.fft + conversao dB (PB08).
+    end note
+
+    class PresetIO <<module>> {
+      +{static} save_preset(engine, filename) : None
+      +{static} load_preset(engine, filename) : None
+      +{static} enum_to_str(obj) : str
+      +{static} to_dict(engine) : dict
+    }
+    note bottom of PresetIO
+      REAPROVEITA synth/file_io.py quase intacto:
+      save_config/load_config + enum_to_str ja
+      serializam dataclass -> JSON.
+      Atende provisoriamente PB14.
+    end note
+  }
+
+  '---------- CAMADA DE UI DE TESTE ----------
+  package "eq.ui  -- depende do DSP, nunca o inverso" <<Frame>> #F3E9F7 {
+
+    class EqInterface {
+      -master : tk.Tk
+      -engine : EqEngine
+      -io : AudioIO
+      -analyzer : SpectrumFFT
+      -nodes : List[BandNode]
+      --
+      +_build_header() : None
+      +_build_curve_area() : None
+      +_build_band_panel() : None
+      +setup_visuals() : None
+      +update_visuals() : None
+      +start_visual_updates() : None
+      +draw_log_axes() : None
+      +draw_theoretical_curve() : None
+      +draw_spectrum() : None
+      +show_clip_indicator(state) : None
+      +save_preset_dialog() : None
+      +load_preset_dialog() : None
+      +update_sample_rate(event) : None
+      +update_buffer_size(event) : None
+      +on_close() : None
+    }
+    note left of EqInterface
+      REAPROVEITA ui/interface.py (FullSynthInterface):
+      - o loop update_visuals() + start_visual_updates()
+        via root.after() e o canvas matplotlib
+        sao MANTIDOS integralmente.
+      - restart_audio_stream(), update_sample_rate(),
+        update_buffer_size(): reaproveitados (PB29).
+      - abas de oscilador/ADSR/modulacao/polifonia
+        e o teclado virtual: REMOVIDOS.
+    end note
+
+    class BandNode {
+      +band_index : int
+      +x_px : float
+      +y_px : float
+      --
+      +hit_test(px, py) : bool
+      +drag_to(px, py) : None
+      +on_wheel(delta) : None
+      +toggle_solo() : None
+      +toggle_bypass() : None
+    }
+    note bottom of BandNode
+      PB21: arrastar = freq (X) + ganho (Y);
+      roda do mouse = fator Q.
+    end note
+
+    class BandControls <<module>> {
+      +{static} update_band_type(engine, i, value)
+      +{static} update_band_freq(engine, i, value, label)
+      +{static} update_band_gain(engine, i, value, label)
+      +{static} update_band_q(engine, i, value, label)
+      +{static} update_band_mode(engine, i, value)
+    }
+    note right of BandControls
+      REFATORA ui/controls/filter_controls.py:
+      as 3 funcoes update_filter_* passam a
+      receber o indice da banda e escrever
+      na EqBand em vez do SynthConfig global.
+    end note
+
+    class SelvaSlider <<tk.Canvas>> {
+      +from_ : float
+      +to_ : float
+      +value : float
+      +command : Callable
+      --
+      +set(value) : None
+      +_on_drag(event) : None
+    }
+    note bottom of SelvaSlider
+      REAPROVEITADO de ui/widgets.py sem alteracao.
+      Usado nos controles numericos das bandas.
+    end note
+  }
+}
+
+'============================================================
+' FASE 2 - PRODUCAO NATIVA C++ / JUCE
+'============================================================
+package "FASE 2 - Producao Nativa C++ / JUCE (Sprints 3-4)" <<Frame>> #EAF6EE {
+
+  '---------- AUDIO THREAD ----------
+  package "cpp.dsp -- Audio Thread: sem new, sem lock (PB10/PB26/PB27)" <<Frame>> #DFF0E4 {
+
+    class BiquadFilter <<SIMD>> {
+      -coeffs : juce::dsp::IIR::Coefficients
+      -filter : juce::dsp::IIR::Filter<float>
+      --
+      +prepare(spec : ProcessSpec) : void
+      +setCoefficients(c) : void
+      +process(context) : void
+      +reset() : void
+      +snapToZero() : void
+    }
+
+    class EqBandNative {
+      +index : int
+      +type : FilterType
+      +mode : ChannelMode
+      +slope : Slope
+      --
+      -freq : ParameterSmoother
+      -gain : ParameterSmoother
+      -q : ParameterSmoother
+      -filters : std::array<BiquadFilter, 8>
+      -bypassed : std::atomic<bool>
+      -soloed : std::atomic<bool>
+      --
+      +prepare(spec) : void
+      +updateCoefficients(fs) : void
+      +process(context) : void
+      +reset() : void
+    }
+
+    class ParameterSmoother {
+      -current : float
+      -target : float
+      -coeff : float
+      --
+      +setTimeConstant(ms, fs) : void
+      +setTarget(v) : void
+      +getNextValue() : float
+      +isSmoothing() : bool
+    }
+    note right of ParameterSmoother
+      One-pole lowpass. Elimina zipper noise
+      e clicks, inclusive na entrada e saida
+      do modo Bypass (PB16).
+    end note
+
+    class Oversampler {
+      -os : juce::dsp::Oversampling<float>
+      --
+      +setFactor(x : int) : void
+      +processSamplesUp(block) : Block
+      +processSamplesDown(block) : void
+      +getLatencyInSamples() : float
+    }
+    note bottom of Oversampler
+      PB11 - decramping: corrige o warping
+      das bandas proximas a Nyquist.
+    end note
+
+    class LockFreeQueue <<juce::AbstractFifo>> {
+      -fifo : juce::AbstractFifo
+      -storage : std::vector<float>
+      --
+      +push(data, numSamples) : bool
+      +pop(dest, numSamples) : int
+      +getFreeSpace() : int
+      +reset() : void
+    }
+    note left of LockFreeQueue
+      Equivalente nativo da visual_queue
+      (queue.Queue) do SelvaSonic, agora sem
+      lock e sem alocacao.
+    end note
+
+    class PluginProcessor <<juce::AudioProcessor>> {
+      +apvts : AudioProcessorValueTreeState
+      -bands : std::array<EqBandNative, 24>
+      -fifo : LockFreeQueue
+      -oversampler : Oversampler
+      -clipDetected : std::atomic<bool>
+      --
+      +prepareToPlay(fs, blockSize) : void
+      +processBlock(buffer, midi) : void
+      +releaseResources() : void
+      +getStateInformation(destData) : void
+      +setStateInformation(data, size) : void
+      +createEditor() : AudioProcessorEditor*
+      -encodeMidSide(buffer) : void
+      -decodeMidSide(buffer) : void
+    }
+    note left of PluginProcessor
+      Dono absoluto do motor DSP.
+      PROIBIDO dentro de processBlock:
+      new / malloc / std::mutex / I-O de arquivo.
+      Metas: CPU < 5% (PB23) e latencia
+      menor ou igual ao buffer da DAW (PB24).
+    end note
+  }
+
+  '---------- THREAD DE ANALISE ----------
+  package "cpp.analysis -- Thread secundaria" <<Frame>> #E6F0F7 {
+    class FftAnalyzer <<juce::Thread>> {
+      -fft : juce::dsp::FFT
+      -window : juce::dsp::WindowingFunction<float>
+      -fifoRef : LockFreeQueue&
+      -magnitudes : std::array<float, 1024>
+      --
+      +run() : void
+      +getMagnitudesDb() : const float*
+      +setFftOrder(order : int) : void
+    }
+  }
+
+  '---------- MESSAGE THREAD ----------
+  package "cpp.ui -- Message Thread a 60 FPS (PB25)" <<Frame>> #F3E9F7 {
+
+    class PluginEditor <<juce::AudioProcessorEditor, juce::Timer>> {
+      -processor : PluginProcessor&
+      -curve : InteractiveCurve
+      -stateCtrl : StateController
+      --
+      +paint(g) : void
+      +resized() : void
+      +timerCallback() : void
+    }
+
+    class InteractiveCurve <<juce::Component>> {
+      -nodes : std::array<BandNodeNative, 24>
+      --
+      +paint(g) : void
+      +drawTheoreticalCurve(g) : void
+      +drawSpectrum(g) : void
+      +drawLogGrid(g) : void
+      +mouseDown(e) : void
+      +mouseDrag(e) : void
+      +mouseWheelMove(e, wheel) : void
+    }
+
+    class BandNodeNative <<juce::Component>> {
+      +bandIndex : int
+      -freqAttachment : SliderAttachment
+      -gainAttachment : SliderAttachment
+      -qAttachment : SliderAttachment
+      --
+      +mouseDrag(e) : void
+      +toggleSolo() : void
+      +toggleBypass() : void
+    }
+
+    class StateController {
+      -undoManager : juce::UndoManager
+      -slotA : ValueTree
+      -slotB : ValueTree
+      --
+      +beginTransaction(name) : void
+      +undo() : void
+      +redo() : void
+      +storeA() : void
+      +storeB() : void
+      +compareAB() : void
+    }
+
+    class PresetManager {
+      +save(name : String) : void
+      +load(file : juce::File) : void
+      +listPresets() : StringArray
+      +exportXml() : XmlElement
+    }
+    note right of PresetManager
+      PB13 / PB14 / PB15: serializacao XML da
+      arvore APVTS no file system do SO.
+    end note
+  }
+}
+
+'------------------------------------------------------------
+' RELACOES - PYTHON
+'------------------------------------------------------------
+EqEngine "1" *-- "0..24" EqBand
+EqEngine --> EqConfig
+EqBand ..> BiquadMath
+EqBand "1" *-- "1..8" Coeffs
+EqBand --> FilterType
+EqBand --> ChannelMode
+EqBand --> Slope
+AudioIO --> EqEngine
+AudioIO --> EqConfig
+AudioIO ..> SpectrumFFT : visual_queue
+EqInterface --> EqEngine
+EqInterface --> AudioIO
+EqInterface --> SpectrumFFT
+EqInterface "1" *-- "0..24" BandNode
+EqInterface ..> BandControls
+EqInterface ..> SelvaSlider
+BandControls ..> EqEngine
+PresetIO ..> EqEngine
+
+'------------------------------------------------------------
+' RELACOES - C++
+'------------------------------------------------------------
+PluginProcessor "1" *-- "24" EqBandNative
+PluginProcessor *-- "1" LockFreeQueue
+PluginProcessor *-- "1" Oversampler
+PluginProcessor --> FilterType
+EqBandNative "1" *-- "1..8" BiquadFilter
+EqBandNative "1" *-- "3" ParameterSmoother
+EqBandNative --> ChannelMode
+EqBandNative --> Slope
+FftAnalyzer --> LockFreeQueue
+PluginEditor --> PluginProcessor : APVTS
+PluginEditor *-- InteractiveCurve
+PluginEditor *-- StateController
+PluginEditor ..> FftAnalyzer
+InteractiveCurve "1" *-- "24" BandNodeNative
+StateController ..> PresetManager
+
+'------------------------------------------------------------
+' PORTABILIDADE PYTHON -> C++ (PB30)
+'------------------------------------------------------------
+BiquadMath    -[#9B59B6,dashed]->  BiquadFilter     : porta para
+EqBand        -[#9B59B6,dashed]->  EqBandNative     : porta para
+EqEngine      -[#9B59B6,dashed]->  PluginProcessor  : porta para
+AudioIO       -[#9B59B6,dashed]->  PluginProcessor  : porta para
+SpectrumFFT   -[#9B59B6,dashed]->  FftAnalyzer      : porta para
+EqInterface   -[#9B59B6,dashed]->  PluginEditor     : porta para
+BandNode      -[#9B59B6,dashed]->  BandNodeNative   : porta para
+PresetIO      -[#9B59B6,dashed]->  PresetManager    : porta para
+
+legend bottom
+  |= Cor |= Significado |
+  | <#E3EDF7> | Nucleo DSP Python - zero dependencia grafica (PB28) |
+  | <#DFF0E4> | Audio Thread C++ - realtime safe (PB26/PB27) |
+  | <#E6F0F7> | Thread de analise FFT |
+  | <#F3E9F7> | Camada de interface |
+  | roxo tracejado | Traducao da Sprint 2 para a Sprint 3 (PB30) |
+endlegend
+
+@enduml

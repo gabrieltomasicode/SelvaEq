@@ -10,8 +10,9 @@ import os
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import numpy as np
+from matplotlib.figure import Figure
 
 from eq.config import EqConfig, FilterType, ChannelMode, InputSource
 from eq.dsp.engine import EqEngine
@@ -212,10 +213,48 @@ class TestUIAndMVCInteroperability(unittest.TestCase):
         ui.show_clip_indicator(False)
         self.assertEqual(io_status.cget("text"), io_text)
         self.assertEqual(media_status.cget("text"), "")
-
         ui.select_tab("test")
         self.assertEqual(tab_draws, {"bands": 3, "io": 2, "test": 2})
         self.assertNotEqual(media_status.cget("text"), "")
+
+    def test_visual_refresh_logs_errors_and_keeps_scheduling(self):
+        ui = object.__new__(EqInterface)
+        ui.visual_paused = False
+        ui.io = SimpleNamespace(
+            visual_queue=SimpleNamespace(empty=lambda: True),
+            clip_detected=False,
+        )
+        ui._update_window_title = Mock()
+        ui.show_clip_indicator = Mock()
+        ui.draw_theoretical_curve = Mock(side_effect=RuntimeError("curve failure"))
+        ui.draw_spectrum = Mock()
+        ui.canvas_mpl = None
+        ui.master = SimpleNamespace(after=Mock(return_value="next-refresh"))
+
+        with self.assertLogs("eq.ui.interface", level="ERROR") as captured:
+            ui.update_visuals()
+
+        self.assertIn("curve failure", captured.output[0])
+        self.assertEqual(ui.master.after.call_args.args[0], 33)
+        self.assertIs(ui.master.after.call_args.args[1].__self__, ui)
+        self.assertEqual(ui.visual_update_id, "next-refresh")
+
+    def test_close_cancels_pending_tkagg_draw(self):
+        ui = object.__new__(EqInterface)
+        ui._resize_job = None
+        ui.visual_update_id = None
+        ui.io = Mock()
+        tk_canvas = SimpleNamespace(after_cancel=Mock())
+        ui.canvas_mpl = SimpleNamespace(_idle_draw_id="draw-id", _tkcanvas=tk_canvas)
+        ui.master = Mock()
+
+        with patch("cleancache.remove_pycache_and_pyc") as clean_cache:
+            ui.on_close()
+
+        tk_canvas.after_cancel.assert_called_once_with("draw-id")
+        self.assertIsNone(ui.canvas_mpl._idle_draw_id)
+        ui.master.destroy.assert_called_once_with()
+        clean_cache.assert_called_once()
 
     def test_band_node_log_coordinates_drag_and_wheel_pb21(self):
         """PB21: Valida conversões logarítmicas e interação de arraste/roda do `BandNode` com `EqEngine`."""
@@ -240,6 +279,44 @@ class TestUIAndMVCInteroperability(unittest.TestCase):
         self.assertTrue(engine.bands[0].solo)
         node.toggle_bypass()
         self.assertTrue(engine.bands[0].bypass)
+
+    def test_curve_redraw_reuses_fill_and_band_annotation_artists(self):
+        engine = EqEngine(EqConfig(sample_rate=48000))
+        engine.add_band(freq_hz=1000.0, gain_db=3.0, q=1.0)
+        ui = object.__new__(EqInterface)
+        ui.engine = engine
+        ui.config = engine.config
+        ui.selected_band_index = 0
+        ui.ax = Figure().add_subplot(111)
+        ui.curve_line = None
+        ui._curve_fill = None
+        ui.selected_band_curve_line = None
+        ui.legend = None
+        ui.nodes_active_line = None
+        ui.nodes_bypass_line = None
+        ui.nodes_solo_line = None
+        ui.selected_node_line = None
+        ui._node_annotations = []
+
+        ui.draw_theoretical_curve()
+        fill_artist = ui._curve_fill
+        annotation = ui._node_annotations[0]
+        self.assertEqual(len(ui.ax.texts), 1)
+
+        engine.set_param(0, "gain_db", 6.0)
+        ui.draw_theoretical_curve()
+        self.assertIs(ui._curve_fill, fill_artist)
+        self.assertIs(ui._node_annotations[0], annotation)
+        self.assertEqual(annotation.get_text(), "1")
+        self.assertEqual(annotation.xy, (engine.bands[0].freq_hz, engine.bands[0].gain_db))
+
+        engine.add_band(freq_hz=2000.0, gain_db=-3.0, q=1.0)
+        ui.draw_theoretical_curve()
+        self.assertEqual(len(ui._node_annotations), 2)
+        engine.remove_band(1)
+        ui.draw_theoretical_curve()
+        self.assertEqual(len(ui._node_annotations), 1)
+        self.assertEqual(len(ui.ax.texts), 1)
 
     def test_create_edit_and_delete_bands_directly_on_spectrum_graph(self):
         """

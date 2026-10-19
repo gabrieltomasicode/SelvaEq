@@ -1,0 +1,116 @@
+@startuml estados_banda_plugin
+'============================================================
+' DIAGRAMA DE ESTADOS
+' (a) ciclo de vida do plugin  (b) estados de uma banda
+' Cobre PB01, PB12, PB16, PB18, PB29
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam stateBorderColor #2F4858
+skinparam stateBackgroundColor #FFFFFF
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+
+title Diagrama de Estados - Ciclo de vida do plugin e de uma banda
+
+'------------------------------------------------------------
+' (a) CICLO DE VIDA DO PLUGIN
+'------------------------------------------------------------
+state "CICLO DE VIDA DO PLUGIN" as PLUGIN {
+
+  [*] --> Instanciado
+  Instanciado : construtor do PluginProcessor
+  Instanciado : cria a arvore APVTS (24 bandas)
+
+  Instanciado --> Preparado : prepareToPlay(fs, blockSize)
+  Preparado : aloca buffers, FIFO e oversampler
+  Preparado : reporta latencia ao host
+  Preparado : **unico ponto onde alocar e permitido**
+
+  Preparado --> Processando : stream iniciado
+  Processando : processBlock em loop
+  Processando : realtime safe
+
+  Processando --> Preparado : mudanca de sample rate\nou de buffer size (PB29)
+  note right of Preparado
+    Reconfigurar exige parar o stream,
+    realocar e reiniciar. Reaproveita a
+    logica de restart_audio_stream()
+    do SelvaSonic.
+  end note
+
+  Processando --> Suspenso : host pausa o transporte
+  Suspenso --> Processando : retomar
+  Suspenso : mantem o estado dos filtros
+
+  Processando --> Liberado : releaseResources()
+  Suspenso --> Liberado : releaseResources()
+  Liberado --> Preparado : prepareToPlay novamente
+  Liberado --> [*] : destrutor
+}
+
+'------------------------------------------------------------
+' (b) ESTADOS DE UMA BANDA
+'------------------------------------------------------------
+state "ESTADOS DE UMA BANDA (EqBand)" as BANDA {
+
+  [*] --> Inativa
+  Inativa : banda nao alocada na curva
+
+  Inativa --> Ativa : addBand()
+  Ativa : coeficientes calculados
+  Ativa : contribui para a soma da curva
+  Ativa : estado zi/zf sendo mantido
+
+  state Ativa {
+    [*] --> Estavel
+    Estavel : parametros sem movimento
+    Estavel : coeficientes vindos do cache
+
+    Estavel --> Suavizando : usuario altera freq / ganho / Q
+    Suavizando : ParameterSmoother interpolando
+    Suavizando : coeficientes recalculados por bloco
+    Suavizando --> Estavel : isSmoothing() == false
+
+    Estavel --> Solo : Alt + clique (segurar)
+    Solo : vira band-pass temporario
+    Solo : demais bandas silenciadas
+    Solo --> Estavel : soltar o modificador
+    note right of Solo
+      PB12. A entrada e a saida do solo
+      passam pelo smoother, entao nao
+      geram click (PB16).
+    end note
+  }
+
+  Ativa --> Bypass : toggleBypass()
+  Bypass : sinal passa sem processar
+  Bypass : rampa de saida suavizada
+  Bypass --> Ativa : toggleBypass()
+
+  Ativa --> Inativa : removeBand()
+  Bypass --> Inativa : removeBand()
+  Inativa --> [*]
+}
+
+'------------------------------------------------------------
+' (c) PILHA DE HISTORICO
+'------------------------------------------------------------
+state "HISTORICO DE EDICAO (StateController - PB18)" as HIST {
+  [*] --> Limpo
+  Limpo --> Sujo : primeira transacao confirmada
+  Sujo : pilha de undo com N entradas
+  Sujo --> Sujo : nova transacao
+  Sujo --> Sujo : undo() / redo()
+  Sujo --> Limpo : preset carregado ou salvo
+  note right of Sujo
+    Cada arraste de no e UMA transacao
+    (beginTransaction no mouseDown,
+    commit no mouseUp), nao uma por
+    evento de movimento.
+  end note
+}
+
+@enduml

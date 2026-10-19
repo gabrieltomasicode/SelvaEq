@@ -1,0 +1,99 @@
+@startuml sequencia_edicao_banda
+'============================================================
+' DIAGRAMA DE SEQUENCIA - Usuario edita uma banda pela curva
+' Cobre PB03, PB06, PB18, PB21, PB16, PB13, PB14
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam sequenceParticipantBorderColor #2F4858
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+
+title Sequencia - Interacao do usuario com a curva de EQ\n(drag/drop, undo/redo e presets)
+
+actor "Engenheiro\nde audio" as USER
+participant "InteractiveCurve\n(canvas)" as CURVE #F3E9F7
+participant "BandNode" as NODE #F3E9F7
+participant "StateController\n(UndoManager)" as STATE #F3E9F7
+participant "APVTS\n/ EqEngine" as APV #FDF0E3
+participant "ParameterSmoother" as SM #DFF0E4
+participant "EqBand" as BAND #DFF0E4
+participant "PresetManager\n/ PresetIO" as PRESET #EFEFE6
+
+== Criar uma banda (PB04) ==
+USER -> CURVE : duplo clique em ponto vazio
+CURVE -> CURVE : converte pixel -> (Hz, dB)\nusando escala logaritmica
+CURVE -> STATE : beginTransaction("Criar banda")
+CURVE -> APV : addBand(freq, gain, q, PEAKING)
+APV -> BAND : prepare + updateCoefficients(fs)
+CURVE -> NODE : instancia no visivel
+NODE --> USER : no desenhado sobre a curva
+
+== Arrastar o no (PB21, PB06) ==
+USER -> NODE : mouseDown
+NODE -> STATE : beginTransaction("Editar banda 7")
+loop enquanto arrasta
+  USER -> NODE : mouseDrag(x, y)
+  NODE -> NODE : x -> frequencia (log)\ny -> ganho (linear em dB)
+  NODE -> APV : setValueNotifyingHost(freq, gain)
+  APV -> SM : setTarget(novo valor)
+  note right of SM
+    PB06 / PB16: o valor nao salta.
+    O smoother interpola ao longo
+    dos samples do proximo bloco,
+    evitando zipper noise.
+  end note
+  APV --> CURVE : parameterChanged
+  CURVE -> CURVE : recalcula a curva teorica (freqz)
+  CURVE --> USER : feedback visual a 60 FPS
+end
+USER -> NODE : mouseUp
+NODE -> STATE : commit da transacao
+
+== Ajustar o Q (PB21) ==
+USER -> NODE : roda do mouse sobre o no
+NODE -> APV : setValue(q)
+APV -> SM : setTarget(q)
+SM -> BAND : getNextValue() no proximo bloco
+BAND -> BAND : updateCoefficients(fs)
+
+== Solo e bypass temporario (PB12) ==
+USER -> NODE : Alt + clique (segurar)
+NODE -> APV : soloed.store(true)
+APV -> BAND : vira band-pass, demais silenciadas
+USER -> NODE : soltar
+NODE -> APV : soloed.store(false)
+note right of BAND
+  A transicao entra e sai pelo smoother,
+  entao nao produz click (PB16).
+end note
+
+== Undo / Redo (PB18) ==
+USER -> STATE : Ctrl+Z
+STATE -> APV : restaura ValueTree anterior
+APV -> BAND : updateCoefficients(fs)
+APV --> CURVE : parameterChanged em lote
+CURVE --> USER : curva e nos voltam ao estado anterior
+
+== Comparacao A/B (PB18) ==
+USER -> STATE : armazenar em A
+STATE -> STATE : slotA = apvts.copyState()
+USER -> STATE : alternar para B
+STATE -> APV : replaceState(slotB)
+
+== Salvar preset (PB13, PB14, PB15) ==
+USER -> PRESET : salvar como "Vocal Bus"
+PRESET -> APV : copyState()
+APV --> PRESET : ValueTree
+PRESET -> PRESET : serializa XML (C++)\nou JSON (prototipo Python)
+PRESET --> USER : arquivo gravado no file system do SO
+
+note over USER, PRESET
+  Nenhuma dessas operacoes toca a Audio Thread diretamente:
+  tudo passa pelo APVTS (atomico) e so tem efeito no proximo
+  bloco, ja suavizado pelo ParameterSmoother.
+end note
+
+@enduml

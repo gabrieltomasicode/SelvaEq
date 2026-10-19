@@ -1,0 +1,116 @@
+@startuml fluxo_sinal_pb34
+'============================================================
+' PB34 - DIAGRAMA DE BLOCOS DE FLUXO DE SINAL
+' L/R -> Mid/Side -> split por banda -> cascata -> reverso -> saida
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam rectangleBorderColor #2F4858
+skinparam ArrowColor #2F4858
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+left to right direction
+
+title PB34 - Fluxo de Sinal do Equalizador\n(caminho identico no prototipo Python e no plugin C++)
+
+rectangle "**ENTRADA**" <<Frame>> #EEF4FB {
+  rectangle "Fonte\nmic / WAV / DAW" as SRC #FFFFFF
+  rectangle "Buffer de entrada\n[frames x 2] float32\nL | R" as INBUF #FFFFFF
+}
+
+rectangle "**PRE-PROCESSAMENTO**" <<Frame>> #FDF0E3 {
+  rectangle "Oversampling\nUP x2 / x4\n(PB11 - decramping)" as OSUP #FFFFFF
+  rectangle "Matriz de codificacao M/S\nM = (L + R) / 2\nS = (L - R) / 2\n(PB22)" as MS_ENC #FFFFFF
+  rectangle "Chave de roteamento\nSTEREO | L | R | MID | SIDE" as ROUTE #FFFFFF
+}
+
+rectangle "**MOTOR DE EQUALIZACAO - 24 bandas (PB04)**" <<Frame>> #E3EDF7 {
+  rectangle "Banda 01\nLOW_CUT\ncascata Butterworth\n6..96 dB/oct" as B1 #FFFFFF
+  rectangle "Banda 02..23\nPEAKING / SHELF /\nNOTCH / BAND_PASS" as B2 #FFFFFF
+  rectangle "Banda 24\nHIGH_CUT" as B24 #FFFFFF
+  rectangle "Resolucao de\nSolo / Bypass\n(PB12)" as SOLO #FFFFFF
+}
+
+rectangle "**SUAVIZACAO E SEGURANCA**" <<Frame>> #DFF0E4 {
+  rectangle "ParameterSmoother\none-pole lowpass em\nfreq / ganho / Q\n(PB06, PB16)" as SMOOTH #FFFFFF
+  rectangle "Estado do filtro\nzi / zf preservado\nentre blocos" as STATE #FFFFFF
+}
+
+rectangle "**POS-PROCESSAMENTO**" <<Frame>> #FDF0E3 {
+  rectangle "Matriz de decodificacao M/S\nL = M + S\nR = M - S" as MS_DEC #FFFFFF
+  rectangle "Oversampling\nDOWN + filtro anti-alias" as OSDOWN #FFFFFF
+  rectangle "Ganho de saida\n+ detector de clipping\npico > 0 dBFS (PB20)" as OUTGAIN #FFFFFF
+}
+
+rectangle "**SAIDA**" <<Frame>> #EAF6EE {
+  rectangle "Buffer de saida\n[frames x 2] L | R" as OUTBUF #FFFFFF
+  rectangle "Placa de audio / DAW" as SINK #FFFFFF
+}
+
+rectangle "**RAMO DE ANALISE (paralelo, nao altera o sinal)**" <<Frame>> #E6F0F7 {
+  rectangle "Copia do bloco ->\nLockFreeQueue\n(visual_queue no Python)" as TAP #FFFFFF
+  rectangle "Janelamento\n(Hann / Blackman-Harris)" as WIN #FFFFFF
+  rectangle "FFT\nscipy.fft / juce::dsp::FFT\n(PB08)" as FFT #FFFFFF
+  rectangle "Magnitude -> dB\nescala logaritmica" as DB #FFFFFF
+  rectangle "Curva teorica\nfreqz das 24 bandas\n(PB09)" as CURVE #FFFFFF
+  rectangle "Render 60 FPS\n(PB07, PB25)" as RENDER #FFFFFF
+}
+
+'------------------------------------------------------------
+' CAMINHO PRINCIPAL DO SINAL
+'------------------------------------------------------------
+SRC --> INBUF
+INBUF --> OSUP
+OSUP --> MS_ENC
+MS_ENC --> ROUTE
+ROUTE --> B1
+B1 --> B2 : cascata serial
+B2 --> B24 : cascata serial
+B24 --> SOLO
+SOLO --> MS_DEC
+MS_DEC --> OSDOWN
+OSDOWN --> OUTGAIN
+OUTGAIN --> OUTBUF
+OUTBUF --> SINK
+
+'------------------------------------------------------------
+' CONTROLE
+'------------------------------------------------------------
+SMOOTH ..> B1 : coeficientes\ninterpolados
+SMOOTH ..> B2
+SMOOTH ..> B24
+STATE ..> B2 : continuidade\nentre buffers
+
+'------------------------------------------------------------
+' RAMO DE ANALISE
+'------------------------------------------------------------
+INBUF ..> TAP : pre-EQ
+OUTBUF ..> TAP : pos-EQ
+TAP --> WIN
+WIN --> FFT
+FFT --> DB
+DB --> RENDER
+SOLO ..> CURVE : parametros das bandas
+CURVE --> RENDER
+
+note bottom of SOLO
+  Se alguma banda estiver em SOLO, as demais
+  sao ignoradas no somatorio e a banda em foco
+  vira um band-pass temporario (PB12).
+end note
+
+note bottom of OSUP
+  Oversampling so e ativado quando existe
+  banda com f0 acima de ~0.4 * Nyquist.
+  Custo de CPU x2/x4 (avaliar contra PB23).
+end note
+
+note right of OUTGAIN
+  No prototipo Python o np.tanh() usado como
+  soft clip no SelvaSonic e substituido por
+  medicao de pico: o EQ nao deve colorir o
+  sinal sem que o usuario peca.
+end note
+
+@enduml

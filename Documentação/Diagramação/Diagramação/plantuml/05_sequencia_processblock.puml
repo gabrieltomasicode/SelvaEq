@@ -1,0 +1,146 @@
+@startuml sequencia_processblock
+'============================================================
+' DIAGRAMA DE SEQUENCIA - Ciclo de processamento de um bloco
+' Cobre PB01, PB02, PB10, PB20, PB26, PB27, PB08, PB25
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam sequenceParticipantBorderColor #2F4858
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+skinparam sequenceGroupBorderColor #7A8B99
+
+title Sequencia - Processamento de um bloco de audio\n(3 threads: Audio, Analise e Interface)
+
+box "Audio Thread (prioridade realtime)" #DFF0E4
+  participant "DAW Host\n/ sounddevice" as HOST
+  participant "PluginProcessor\n(AudioIO + EqEngine)" as PROC
+  participant "Oversampler" as OS
+  participant "EqBand x24" as BAND
+  participant "ParameterSmoother" as SM
+  participant "BiquadFilter" as BIQ
+end box
+
+box "Ponte sem lock" #FDF0E3
+  participant "LockFreeQueue\n(visual_queue)" as FIFO
+  participant "APVTS / atomics" as APV
+end box
+
+box "Thread de Analise" #E6F0F7
+  participant "FftAnalyzer\n(SpectrumFFT)" as FFT
+end box
+
+box "Message Thread (60 FPS)" #F3E9F7
+  participant "PluginEditor\n(EqInterface)" as UI
+end box
+
+== Preparacao (uma vez, fora do realtime) ==
+HOST -> PROC : prepareToPlay(fs, blockSize)
+activate PROC
+PROC -> PROC : aloca buffers, arrays e FIFO\n**toda alocacao acontece aqui**
+PROC -> BAND : prepare(spec)
+PROC -> OS : setFactor(x)
+PROC -> HOST : setLatencySamples(os.getLatency())
+deactivate PROC
+note over PROC
+  PB26 / PB27: depois deste ponto
+  nenhum new, malloc, resize ou
+  mutex pode ocorrer no caminho
+  de audio.
+end note
+
+== Ciclo por bloco (repete a cada buffer) ==
+loop a cada buffer (ex.: 512 frames @ 48 kHz -> ~10,6 ms)
+
+  HOST -> PROC : processBlock(buffer, midi)
+  activate PROC
+
+  PROC -> APV : load() dos parametros\n(std::atomic, sem lock)
+  APV --> PROC : freq / ganho / Q / tipo / modo
+
+  PROC -> FIFO : push(copia do bloco PRE-EQ)
+  note right of FIFO
+    Se a fila estiver cheia o push
+    e descartado. A Audio Thread
+    NUNCA espera pela UI.
+  end note
+
+  alt oversampling ativo (PB11)
+    PROC -> OS : processSamplesUp(block)
+    OS --> PROC : bloco superamostrado
+  end
+
+  alt modo Mid/Side (PB22)
+    PROC -> PROC : encodeMidSide(buffer)
+  end
+
+  loop para cada uma das 24 bandas
+    PROC -> BAND : process(context)
+    activate BAND
+
+    BAND -> SM : getNextValue() x3
+    SM --> BAND : freq, ganho e Q interpolados
+
+    alt parametro ainda em movimento
+      BAND -> BAND : updateCoefficients(fs)\n(RBJ, sem alocar)
+    end
+
+    alt banda em bypass ou fora do solo (PB12)
+      BAND --> PROC : passa adiante sem processar
+    else banda ativa
+      loop cascata de 1 a 8 biquads (slope)
+        BAND -> BIQ : process(context)  [SIMD]
+        BIQ --> BAND : bloco filtrado\n(estado zi/zf mantido)
+      end
+      BAND --> PROC : bloco processado
+    end
+    deactivate BAND
+  end
+
+  alt modo Mid/Side
+    PROC -> PROC : decodeMidSide(buffer)
+  end
+
+  alt oversampling ativo
+    PROC -> OS : processSamplesDown(block)
+    OS --> PROC : bloco na taxa original
+  end
+
+  PROC -> PROC : peak = max(abs(buffer))
+  alt peak > 1.0  (0 dBFS)
+    PROC -> APV : clipDetected.store(true)   [PB20]
+  end
+
+  PROC -> FIFO : push(copia do bloco POS-EQ)
+  PROC --> HOST : buffer preenchido
+  deactivate PROC
+
+end
+
+== Analise em paralelo (nao bloqueia o audio) ==
+loop enquanto a thread estiver ativa
+  FFT -> FIFO : pop(dest, fftSize)
+  FIFO --> FFT : frames disponiveis
+  FFT -> FFT : aplica janela (Hann)
+  FFT -> FFT : performFrequencyOnlyForwardTransform()
+  FFT -> FFT : magnitude -> dB, suavizacao temporal
+end
+
+== Render da interface (PB07, PB25) ==
+loop timerCallback a 60 Hz
+  UI -> FFT : getMagnitudesDb()
+  FFT --> UI : array de magnitudes
+  UI -> APV : load() dos parametros + clipDetected
+  APV --> UI : estado atual
+  UI -> UI : desenha grade log, espectro,\ncurva teorica e os 24 nos
+end
+
+note over HOST, UI
+  **PB23 / PB24**: o tempo total gasto dentro de processBlock
+  deve ficar abaixo da duracao do buffer (~10,6 ms para 512 @ 48 kHz)
+  com folga; meta de uso de CPU menor que 5%.
+end note
+
+@enduml

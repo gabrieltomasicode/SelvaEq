@@ -1,0 +1,171 @@
+@startuml diagrama_componentes_eq
+'============================================================
+' PB32 - DIAGRAMA DE COMPONENTES  (+ PB28 isolamento arquitetural)
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam componentStyle uml2
+skinparam ArrowColor #2F4858
+skinparam componentBorderColor #2F4858
+skinparam packageBorderColor #7A8B99
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+
+title PB32 - Diagrama de Componentes\nBarreira de isolamento DSP x UI (PB28) nas duas fases
+
+'============================================================
+' FASE 1 - PYTHON
+'============================================================
+package "FASE 1 - Prototipo Python (Sprints 1-2)" <<Frame>> #EEF4FB {
+
+  package "Camada de Apresentacao" <<Frame>> #F3E9F7 {
+    [eq/ui/interface.py\n**EqInterface**] as UI_MAIN
+    [eq/ui/controls/band_controls.py\n**BandControls**] as UI_CTRL
+    [eq/ui/widgets.py\n**SelvaSlider** (reuso)] as UI_WID
+    [eq/ui/curve_view.py\n**BandNode** + canvas] as UI_CURVE
+  }
+
+  package "Camada de Dominio DSP  (PB28)" <<Frame>> #E3EDF7 {
+    [eq/dsp/engine.py\n**EqEngine**] as PY_ENGINE
+    [eq/dsp/biquad_math.py\n**BiquadMath** (RBJ)] as PY_MATH
+    [eq/dsp/band.py\n**EqBand**] as PY_BAND
+    [eq/dsp/spectrum.py\n**SpectrumFFT**] as PY_FFT
+  }
+
+  package "Camada de Infraestrutura" <<Frame>> #EFEFE6 {
+    [eq/io/audio_io.py\n**AudioIO**] as PY_IO
+    [eq/io/preset_io.py\n**PresetIO** (reuso file_io)] as PY_PRESET
+    [eq/config.py\n**EqConfig** (reuso SynthConfig)] as PY_CFG
+  }
+
+  interface "IEqControl\nset_param / add_band / remove_band" as I_CTRL
+  interface "IResponse\nglobal_response()" as I_RESP
+  interface "ISpectrum\nmagnitudes_db()" as I_SPEC
+  interface "IAudioBlock\nvisual_queue (Queue maxsize=2)" as I_BLOCK
+  interface "IPreset\nsave_preset / load_preset" as I_PRESET
+
+  UI_MAIN --( I_CTRL
+  UI_CTRL --( I_CTRL
+  UI_CURVE --( I_RESP
+  UI_CURVE --( I_SPEC
+  UI_MAIN --( I_PRESET
+  UI_MAIN ..> UI_WID
+  UI_MAIN ..> UI_CURVE
+  UI_MAIN ..> UI_CTRL
+
+  I_CTRL - PY_ENGINE
+  I_RESP - PY_ENGINE
+  I_SPEC - PY_FFT
+  I_PRESET - PY_PRESET
+
+  PY_ENGINE --> PY_BAND
+  PY_BAND --> PY_MATH
+  PY_ENGINE --> PY_CFG
+  PY_IO --> PY_ENGINE : bloco NumPy por callback
+  PY_IO -- I_BLOCK
+  I_BLOCK )-- PY_FFT
+  PY_PRESET ..> PY_ENGINE
+}
+
+note as N_PB28
+  **PB28 - Isolamento arquitetural**
+  Nenhum modulo de eq/dsp faz
+  import de tkinter, matplotlib ou
+  qualquer biblioteca grafica.
+  A dependencia e sempre
+  UI --> DSP, nunca o contrario.
+  Verificavel por lint/CI:
+  grep -R "import tkinter" eq/dsp/  =>  vazio
+end note
+N_PB28 .. PY_ENGINE
+
+'============================================================
+' FASE 2 - C++ / JUCE
+'============================================================
+package "FASE 2 - Plugin Nativo C++ / JUCE (Sprints 3-4)" <<Frame>> #EAF6EE {
+
+  package "Message Thread" <<Frame>> #F3E9F7 {
+    [PluginEditor] as CPP_ED
+    [InteractiveCurve + BandNode] as CPP_CURVE
+    [StateController\n(UndoManager, A/B)] as CPP_STATE
+    [PresetManager] as CPP_PRESET
+  }
+
+  package "Audio Thread (realtime safe)" <<Frame>> #DFF0E4 {
+    [PluginProcessor] as CPP_PROC
+    [EqBand x24] as CPP_BAND
+    [BiquadFilter (SIMD)] as CPP_BIQ
+    [ParameterSmoother] as CPP_SMOOTH
+    [Oversampler] as CPP_OS
+  }
+
+  package "Thread de Analise" <<Frame>> #E6F0F7 {
+    [FftAnalyzer] as CPP_FFT
+  }
+
+  package "Ponte entre Threads" <<Frame>> #FDF0E3 {
+    [LockFreeQueue\n(juce::AbstractFifo)] as CPP_FIFO
+    [APVTS\n(AudioProcessorValueTreeState)] as CPP_APVTS
+  }
+
+  interface "IParameterTree\natomico / thread-safe" as I_APVTS
+  interface "IAudioStream\nlock-free" as I_FIFO
+  interface "IMagnitudes" as I_MAG
+  interface "IStateXml" as I_XML
+
+  CPP_ED --( I_APVTS
+  CPP_CURVE --( I_APVTS
+  CPP_CURVE --( I_MAG
+  CPP_STATE --( I_APVTS
+  CPP_STATE --( I_XML
+  CPP_PRESET -- I_XML
+
+  I_APVTS - CPP_APVTS
+  CPP_APVTS --> CPP_PROC : parametros atomicos
+  CPP_PROC --> CPP_BAND
+  CPP_BAND --> CPP_BIQ
+  CPP_BAND --> CPP_SMOOTH
+  CPP_PROC --> CPP_OS
+  CPP_PROC -- I_FIFO
+  I_FIFO - CPP_FIFO
+  CPP_FIFO )-- CPP_FFT
+  CPP_FFT -- I_MAG
+  CPP_ED ..> CPP_CURVE
+  CPP_ED ..> CPP_STATE
+}
+
+note as N_THREAD
+  **PB10 / PB26 / PB27**
+  A Audio Thread nunca bloqueia:
+  toda comunicacao com a UI passa
+  por LockFreeQueue (dados de audio)
+  ou por std::atomic via APVTS
+  (parametros). Zero mutex,
+  zero alocacao em processBlock.
+end note
+N_THREAD .. CPP_FIFO
+
+'------------------------------------------------------------
+' ATORES EXTERNOS
+'------------------------------------------------------------
+cloud "Fonte de audio\n(microfone / WAV)" as SRC
+node "DAW Host\n(VST3 / AU)" as DAW
+database "File System do SO\npresets .json / .xml" as FS
+
+SRC --> PY_IO
+PY_IO --> SRC : saida monitorada
+PY_PRESET --> FS
+DAW --> CPP_PROC : processBlock(buffer)
+CPP_PROC --> DAW : buffer processado
+CPP_PRESET --> FS
+
+'------------------------------------------------------------
+' MIGRACAO
+'------------------------------------------------------------
+PY_MATH   -[#9B59B6,dashed]-> CPP_BIQ    : PB30 traducao validada
+PY_ENGINE -[#9B59B6,dashed]-> CPP_PROC   : PB30
+PY_FFT    -[#9B59B6,dashed]-> CPP_FFT    : PB30
+UI_MAIN   -[#9B59B6,dashed]-> CPP_ED     : PB30
+
+@enduml

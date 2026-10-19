@@ -1,0 +1,113 @@
+@startuml diagrama_implantacao
+'============================================================
+' DIAGRAMA DE IMPLANTACAO
+' Fase 1 (prototipo standalone) e Fase 2 (plugin VST3/AU)
+' Cobre PB30 - portabilidade de formatos
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam nodeBorderColor #2F4858
+skinparam noteBackgroundColor #FFF6D9
+skinparam noteBorderColor #C9A227
+
+title Diagrama de Implantacao\nFase 1: aplicacao Python standalone | Fase 2: plugin nativo dentro da DAW
+
+'============================================================
+' FASE 1
+'============================================================
+node "**FASE 1 - Maquina de desenvolvimento**" <<device>> #EEF4FB {
+
+  node "Sistema Operacional\n(Windows / macOS / Linux)" as OS1 {
+
+    node "Runtime Python 3.11+" <<executionEnvironment>> as PYRT {
+      artifact "main.py" as A_MAIN
+      artifact "eq/dsp/*.py\n(NumPy + SciPy)" as A_DSP
+      artifact "eq/io/audio_io.py\n(sounddevice)" as A_IO
+      artifact "eq/ui/*.py\n(Tkinter + Matplotlib)" as A_UI
+      artifact "presets/*.json" as A_JSON
+    }
+
+    node "Driver de audio\nWASAPI / CoreAudio / ALSA" as DRV1
+  }
+}
+
+node "Interface de audio\n(placa / mic)" <<device>> as HW1 #FFFFFF
+
+A_MAIN --> A_UI
+A_UI --> A_DSP
+A_IO --> A_DSP
+A_IO --> DRV1 : PortAudio
+DRV1 --> HW1
+A_DSP --> A_JSON : salva / carrega
+
+note bottom of PYRT
+  Executavel standalone para validacao
+  matematica e de resposta de sinal.
+  Sofre com o GIL: a UI e o audio
+  disputam o mesmo interpretador, por isso
+  esta fase nao tem compromisso de latencia.
+end note
+
+'============================================================
+' FASE 2
+'============================================================
+node "**FASE 2 - Maquina do usuario final**" <<device>> #EAF6EE {
+
+  node "Sistema Operacional" as OS2 {
+
+    node "DAW Host\n(Reaper / Ableton / Logic / FL)" <<executionEnvironment>> as DAW {
+
+      component "Thread de audio da DAW" as T_AUDIO
+      component "Message Thread da DAW" as T_UI
+
+      artifact "**SelvaEQ.vst3**\nPluginProcessor + DSP" as A_VST3
+      artifact "**SelvaEQ.component**\n(AU - somente macOS)" as A_AU
+      artifact "libjuce (estatica)" as A_JUCE
+    }
+
+    node "Driver de audio\nASIO / CoreAudio / WASAPI" as DRV2
+    folder "Pasta de presets do usuario\n~/Documents/SelvaEQ/*.xml" as FS2
+  }
+}
+
+node "Interface de audio profissional" <<device>> as HW2 #FFFFFF
+
+T_AUDIO --> A_VST3 : processBlock()
+T_UI --> A_VST3 : APVTS
+A_VST3 --> A_JUCE
+A_AU --> A_JUCE
+DAW --> DRV2
+DRV2 --> HW2
+A_VST3 --> FS2 : presets XML
+
+note bottom of DAW
+  PB30: um unico codigo-fonte JUCE gera
+  VST3 e AU. O plugin nao possui processo
+  proprio: roda dentro do processo do host,
+  por isso qualquer bloqueio na Audio Thread
+  vira glitch audivel em toda a sessao.
+end note
+
+'============================================================
+' MIGRACAO
+'============================================================
+A_DSP -[#9B59B6,dashed]-> A_VST3 : PB30 - matematica validada\nem Python e traduzida para C++
+A_JSON -[#9B59B6,dashed]-> FS2 : conversao de formato\nJSON -> XML (APVTS)
+
+'============================================================
+' AMBIENTE DE BUILD
+'============================================================
+node "Ambiente de build / CI" <<device>> #F7F7F7 {
+  artifact "CMake + JUCE 7" as BUILD
+  artifact "pluginval\n(validacao automatizada)" as PVAL
+  artifact "pytest\n(testes do motor Python)" as PYTEST
+}
+
+BUILD --> A_VST3 : compila
+BUILD --> A_AU : compila
+PVAL --> A_VST3 : valida (PB17)
+PYTEST --> A_DSP : valida coeficientes\ncontra scipy.signal
+
+@enduml

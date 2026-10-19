@@ -1,0 +1,106 @@
+@startuml casos_de_uso_eq
+'============================================================
+' DIAGRAMA DE CASOS DE USO
+' Apoia PB33 - levantamento de requisitos
+'============================================================
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ArrowColor #2F4858
+skinparam usecaseBorderColor #2F4858
+skinparam actorBorderColor #2F4858
+skinparam packageBorderColor #7A8B99
+left to right direction
+
+title Casos de Uso - Plugin de Equalizacao
+
+actor "Engenheiro de audio\n(usuario final)" as ENG
+actor "DAW Host" as DAW
+actor "Sistema de arquivos" as FS
+actor "Desenvolvedor" as DEV
+
+rectangle "Plugin de Equalizacao" {
+
+  package "Equalizacao" <<Frame>> #E3EDF7 {
+    usecase "UC01\nCriar / remover banda" as UC01
+    usecase "UC02\nAjustar frequencia, ganho e Q" as UC02
+    usecase "UC03\nEscolher o tipo de filtro" as UC03
+    usecase "UC04\nDefinir a inclinacao\n(6 a 96 dB/oct)" as UC04
+    usecase "UC05\nRotear banda\n(L / R / Mid / Side)" as UC05
+    usecase "UC06\nDar solo ou bypass\nem uma banda" as UC06
+    usecase "UC07\nBypass global do plugin" as UC07
+  }
+
+  package "Analise visual" <<Frame>> #E6F0F7 {
+    usecase "UC08\nVisualizar o espectro\nem tempo real" as UC08
+    usecase "UC09\nVisualizar a curva\nteorica de resposta" as UC09
+    usecase "UC10\nDetectar clipping" as UC10
+  }
+
+  package "Gestao de estado" <<Frame>> #F3E9F7 {
+    usecase "UC11\nSalvar preset" as UC11
+    usecase "UC12\nCarregar preset" as UC12
+    usecase "UC13\nDesfazer / refazer" as UC13
+    usecase "UC14\nComparar A/B" as UC14
+  }
+
+  package "Integracao" <<Frame>> #DFF0E4 {
+    usecase "UC15\nProcessar bloco de audio" as UC15
+    usecase "UC16\nInformar latencia ao host" as UC16
+    usecase "UC17\nAdaptar-se ao sample rate\ne ao buffer do host" as UC17
+    usecase "UC18\nPersistir o estado\nna sessao da DAW" as UC18
+  }
+
+  package "Validacao (fase de prototipo)" <<Frame>> #EFEFE6 {
+    usecase "UC19\nComparar coeficientes\ncom scipy.signal" as UC19
+    usecase "UC20\nMedir uso de CPU\ne latencia" as UC20
+  }
+}
+
+ENG --> UC01
+ENG --> UC02
+ENG --> UC03
+ENG --> UC04
+ENG --> UC05
+ENG --> UC06
+ENG --> UC07
+ENG --> UC08
+ENG --> UC09
+ENG --> UC11
+ENG --> UC12
+ENG --> UC13
+ENG --> UC14
+
+DAW --> UC15
+DAW --> UC17
+DAW --> UC18
+UC15 --> DAW
+UC16 --> DAW
+
+FS <-- UC11
+FS --> UC12
+
+DEV --> UC19
+DEV --> UC20
+
+UC01 ..> UC09 : <<include>>
+UC02 ..> UC09 : <<include>>
+UC15 ..> UC10 : <<include>>
+UC15 ..> UC08 : <<include>>
+UC02 ..> UC13 : <<include>>
+UC06 ..> UC02 : <<extend>>
+UC04 ..> UC03 : <<extend>>
+
+note bottom of UC17
+  PB29: nenhum coeficiente pode
+  assumir 44.1 kHz. O host pode
+  entregar de 44.1 a 192 kHz.
+end note
+
+note bottom of UC20
+  PB23 / PB24: uso de CPU abaixo
+  de 5% e latencia menor ou igual
+  ao buffer da DAW.
+end note
+
+@enduml
