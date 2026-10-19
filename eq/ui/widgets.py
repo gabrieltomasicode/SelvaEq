@@ -479,7 +479,10 @@ class SelvaSlider(_CanvasBase):
 
     def set(self, val: float) -> None:
         lo, hi = min(self.from_, self.to_), max(self.from_, self.to_)
-        self.value = clamp(float(val), lo, hi)
+        value = clamp(float(val), lo, hi)
+        if value == self.value:
+            return
+        self.value = value
         self.draw()
 
 
@@ -519,11 +522,17 @@ def _styled_button(parent, text: str, command: Optional[Callable], accent: str =
             lbl.config(bg=C_BG3, fg=C_TEXTO)
 
     def set_active(active: bool) -> None:
-        btn_frame._is_active = bool(active)
+        active = bool(active)
+        if btn_frame._is_active == active:
+            return
+        btn_frame._is_active = active
         _apply_visual(hover=False)
 
     def set_text(new_text: str) -> None:
-        btn_frame._text = str(new_text).upper()
+        new_text = str(new_text).upper()
+        if btn_frame._text == new_text:
+            return
+        btn_frame._text = new_text
         lbl.config(text=btn_frame._text)
 
     btn_frame.set_active = set_active

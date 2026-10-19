@@ -9,6 +9,8 @@ import glob
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import numpy as np
 
 from eq.config import EqConfig, FilterType, ChannelMode, InputSource
@@ -16,7 +18,7 @@ from eq.dsp.engine import EqEngine
 from eq.dsp.spectrum import SpectrumFFT
 from eq.io.audio_io import AudioIO
 from eq.ui.decorators import validate_positive
-from eq.ui.widgets import SelvaSlider
+from eq.ui.widgets import SelvaSlider, _DummyWidget, _styled_button
 from eq.ui.curve_view import BandNode
 from eq.ui.controls.band_controls import BandControls
 from eq.ui.interface import EqInterface
@@ -107,6 +109,113 @@ class TestUIAndMVCInteroperability(unittest.TestCase):
             width = 420
         slider._on_resize(_ResizeEv())
         self.assertEqual(slider.width, 420)
+
+        draw_calls = []
+        original_draw = slider.draw
+
+        def counted_draw():
+            draw_calls.append(1)
+            original_draw()
+
+        slider.draw = counted_draw
+        slider.set(slider.value)
+        self.assertEqual(draw_calls, [])
+        slider.set(slider.value + 1.0)
+        self.assertEqual(len(draw_calls), 1)
+
+    def test_styled_button_setters_skip_unchanged_state(self):
+        with patch(
+            "eq.ui.widgets.tk",
+            SimpleNamespace(Frame=_DummyWidget, Label=_DummyWidget),
+        ):
+            button = _styled_button(_DummyWidget(), "Teste", None)
+
+        frame_config_calls = []
+        label_config_calls = []
+        button.config = lambda **kwargs: frame_config_calls.append(kwargs)
+        button._label.config = lambda **kwargs: label_config_calls.append(kwargs)
+
+        button.set_active(False)
+        button.set_text("Teste")
+        self.assertEqual(frame_config_calls, [])
+        self.assertEqual(label_config_calls, [])
+
+        button.set_active(True)
+        button.set_active(True)
+        button.set_text("Outro")
+        button.set_text("Outro")
+        self.assertEqual(len(frame_config_calls), 1)
+        self.assertEqual(len(label_config_calls), 2)
+
+    def test_periodic_status_refresh_only_updates_active_panel(self):
+        ui = object.__new__(EqInterface)
+        ui.current_tab = "bands"
+        ui._tabs_initialized = False
+        ui.panels = {tab: _DummyWidget() for tab in ("bands", "io", "test")}
+        ui.tab_buttons = {
+            tab: {"canvas": _DummyWidget(), "text": tab}
+            for tab in ("bands", "io", "test")
+        }
+        tab_draws = {tab: 0 for tab in ui.tab_buttons}
+        panel_actions = {tab: {"pack": 0, "forget": 0} for tab in ui.panels}
+        for tab, data in ui.tab_buttons.items():
+            data["canvas"].delete = lambda *args, _tab=tab: tab_draws.__setitem__(
+                _tab, tab_draws[_tab] + 1
+            )
+        for tab, panel in ui.panels.items():
+            panel.pack = lambda _tab=tab, **kwargs: panel_actions[_tab].__setitem__(
+                "pack", panel_actions[_tab]["pack"] + 1
+            )
+            panel.pack_forget = lambda _tab=tab: panel_actions[_tab].__setitem__(
+                "forget", panel_actions[_tab]["forget"] + 1
+            )
+        ui.clip_label = _DummyWidget()
+        ui.meter_canvas = None
+        ui.config = SimpleNamespace(input_source=SimpleNamespace(name="SYNTH_DRONE"))
+        ui.io = SimpleNamespace(
+            last_peak_dbfs=-12.0,
+            last_rms_dbfs=-18.0,
+            muted=False,
+            last_stream_error="",
+            stream_mode="simulated",
+            media_streamer=SimpleNamespace(
+                playing=False,
+                loop=False,
+                has_file=lambda: False,
+            ),
+        )
+        io_status = _DummyWidget()
+        media_status = _DummyWidget()
+        ui.io_widgets = {"io_status_label": io_status}
+        ui.test_widgets = {"media_info_label": media_status}
+
+        ui.show_clip_indicator(False)
+        self.assertEqual(io_status.cget("text"), "")
+        self.assertEqual(media_status.cget("text"), "")
+
+        ui.select_tab("io")
+        self.assertNotEqual(io_status.cget("text"), "")
+        self.assertEqual(media_status.cget("text"), "")
+        first_tab_draws = dict(tab_draws)
+        first_panel_actions = {
+            tab: dict(actions) for tab, actions in panel_actions.items()
+        }
+        ui.select_tab("io")
+        self.assertEqual(tab_draws, first_tab_draws)
+        self.assertEqual(panel_actions, first_panel_actions)
+
+        io_text = io_status.cget("text")
+        ui.select_tab("bands")
+        self.assertEqual(tab_draws, {"bands": 2, "io": 2, "test": 1})
+        self.assertEqual(panel_actions["io"]["forget"], 1)
+        self.assertEqual(panel_actions["bands"]["pack"], 1)
+        ui.show_clip_indicator(False)
+        self.assertEqual(io_status.cget("text"), io_text)
+        self.assertEqual(media_status.cget("text"), "")
+
+        ui.select_tab("test")
+        self.assertEqual(tab_draws, {"bands": 3, "io": 2, "test": 2})
+        self.assertNotEqual(media_status.cget("text"), "")
 
     def test_band_node_log_coordinates_drag_and_wheel_pb21(self):
         """PB21: Valida conversões logarítmicas e interação de arraste/roda do `BandNode` com `EqEngine`."""

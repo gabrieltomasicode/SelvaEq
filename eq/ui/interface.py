@@ -120,6 +120,7 @@ class EqInterface:
         self.clip_indicator_state: bool = False
         self.is_fullscreen: bool = False
         self.current_tab: str = "bands"
+        self._tabs_initialized: bool = False
         self.tab_buttons: Dict[str, dict] = {}
         self.panels: Dict[str, Any] = {}
         self._node_annotations: List[Any] = []
@@ -489,8 +490,15 @@ class EqInterface:
         """Alterna entre as abas 'bands', 'io' e 'test' com alto contraste nas abas inativas (D07)."""
         if tab_id not in self.panels:
             return
+        previous_tab = self.current_tab
+        if self._tabs_initialized and previous_tab == tab_id:
+            self._sync_active_tab_status()
+            return
+
         self.current_tab = tab_id
-        for tid, data in self.tab_buttons.items():
+        tab_ids = self.tab_buttons if not self._tabs_initialized else (previous_tab, tab_id)
+        for tid in tab_ids:
+            data = self.tab_buttons[tid]
             c = data["canvas"]
             text = data["text"]
             c.delete("all")
@@ -502,11 +510,11 @@ class EqInterface:
                 c.create_polygon(pts, fill=C_BG3, outline=C_MARROM)
                 c.create_text(117, 15, text=text.upper(), font=F_BARLOW, fill=C_TEXTO)
 
-        for tid, panel_frame in self.panels.items():
-            if tid == tab_id:
-                panel_frame.pack(fill="both", expand=True)
-            else:
-                panel_frame.pack_forget()
+        if self._tabs_initialized:
+            self.panels[previous_tab].pack_forget()
+        self.panels[tab_id].pack(fill="both", expand=True)
+        self._tabs_initialized = True
+        self._sync_active_tab_status()
 
     def _build_band_panel(self) -> None:
         """Constrói a Aba 1: Controles das Bandas."""
@@ -1099,10 +1107,75 @@ class EqInterface:
         rem = sec - (mins * 60)
         return f"{mins:02d}:{rem:04.1f}"
 
+    def _sync_active_tab_status(self) -> None:
+        if self.current_tab == "io":
+            self._sync_io_status()
+        elif self.current_tab == "test":
+            self._sync_test_media_status()
+
+    def _sync_io_status(self) -> None:
+        if not hasattr(self, "io_widgets") or "io_status_label" not in self.io_widgets:
+            return
+        if getattr(self.io, "last_stream_error", ""):
+            text, fg = f"✖ Stream Erro: {self.io.stream_mode}", C_VERMELHO
+        elif "Simulado" in str(self.io.stream_mode):
+            text, fg = f"● Stream: {self.io.stream_mode}", C_AMARELO
+        else:
+            text, fg = f"● Stream Ativo: {self.io.stream_mode}", C_VERDE_CLARO
+        label = self.io_widgets["io_status_label"]
+        if label.cget("text") != text or label.cget("fg") != fg:
+            label.config(text=text, fg=fg)
+
+    def _sync_test_media_status(self) -> None:
+        if not hasattr(self, "test_widgets") or "media_info_label" not in self.test_widgets:
+            return
+
+        ms = self.io.media_streamer
+        if "play_btn" in self.test_widgets and hasattr(self.test_widgets["play_btn"], "set_active"):
+            self.test_widgets["play_btn"].set_active(ms.playing)
+        if "loop_btn" in self.test_widgets and hasattr(self.test_widgets["loop_btn"], "set_active"):
+            self.test_widgets["loop_btn"].set_active(ms.loop)
+            self.test_widgets["loop_btn"].set_text("🔁 Loop: ON" if ms.loop else "🔁 Loop: OFF")
+
+        if ms.has_file() and ms.filepath:
+            pos_s = ms.get_position_seconds()
+            dur_s = ms.get_duration_seconds()
+            fname = os.path.basename(ms.filepath)
+            state_icon = "▶" if ms.playing else "⏸"
+            pos_fmt = self._format_time_mmss(pos_s)
+            dur_fmt = self._format_time_mmss(dur_s)
+            media_text = f"{state_icon} {fname} | {pos_fmt} / {dur_fmt} (SR: {self.config.sample_rate}Hz)"
+            media_label = self.test_widgets["media_info_label"]
+            if media_label.cget("text") != media_text or media_label.cget("fg") != C_AMARELO:
+                media_label.config(text=media_text, fg=C_AMARELO)
+            seek_sl = self.test_widgets.get("seek_slider")
+            if seek_sl is not None and not getattr(seek_sl, "is_dragging", False):
+                new_to = max(1.0, dur_s)
+                old_value = seek_sl.value
+                range_changed = seek_sl.to_ != new_to
+                seek_sl.to_ = new_to
+                seek_sl.set(pos_s)
+                if range_changed and seek_sl.value == old_value:
+                    seek_sl.draw()
+            if "seek_label" in self.test_widgets:
+                seek_label = self.test_widgets["seek_label"]
+                seek_text = f"{pos_s:.1f}s / {dur_s:.1f}s"
+                if seek_label.cget("text") != seek_text:
+                    seek_label.config(text=seek_text)
+        else:
+            media_text = "Arquivo: Nenhum MP3/WAV carregado (Usando Gerador em Tempo Real)"
+            media_label = self.test_widgets["media_info_label"]
+            if media_label.cget("text") != media_text or media_label.cget("fg") != C_TEXTO2:
+                media_label.config(text=media_text, fg=C_TEXTO2)
+            if "seek_label" in self.test_widgets:
+                seek_label = self.test_widgets["seek_label"]
+                if seek_label.cget("text") != "0.0s / 0.0s":
+                    seek_label.config(text="0.0s / 0.0s")
+
     def show_clip_indicator(self, state: bool) -> None:
         """
         Atualiza o indicador visual de Clipping (> 0 dBFS), barra de nível Pico/RMS (V07),
-        LED colorido de status do stream (D09) e posição `pos / dur` em tempo real do player (D10).
+        e sincroniza os estados de I/O/player somente quando a aba correspondente está ativa.
         """
         self.clip_indicator_state = bool(state)
         peak_db = float(self.io.last_peak_dbfs)
@@ -1127,57 +1200,7 @@ class EqInterface:
             except Exception:
                 pass
 
-        # D09: LED colorido para status do stream na Aba 2
-        if hasattr(self, "io_widgets") and "io_status_label" in self.io_widgets:
-            if getattr(self.io, "last_stream_error", ""):
-                self.io_widgets["io_status_label"].config(
-                    text=f"✖ Stream Erro: {self.io.stream_mode}",
-                    fg=C_VERMELHO,
-                )
-            elif "Simulado" in str(self.io.stream_mode):
-                self.io_widgets["io_status_label"].config(
-                    text=f"● Stream: {self.io.stream_mode}",
-                    fg=C_AMARELO,
-                )
-            else:
-                self.io_widgets["io_status_label"].config(
-                    text=f"● Stream Ativo: {self.io.stream_mode}",
-                    fg=C_VERDE_CLARO,
-                )
-
-        # D10: Atualização contextual de media_info_label e seek_label (pos / dur) na Aba 3
-        if hasattr(self, "test_widgets") and "media_info_label" in self.test_widgets:
-            ms = self.io.media_streamer
-            if "play_btn" in self.test_widgets and hasattr(self.test_widgets["play_btn"], "set_active"):
-                self.test_widgets["play_btn"].set_active(ms.playing)
-            if "loop_btn" in self.test_widgets and hasattr(self.test_widgets["loop_btn"], "set_active"):
-                self.test_widgets["loop_btn"].set_active(ms.loop)
-                self.test_widgets["loop_btn"].set_text("🔁 Loop: ON" if ms.loop else "🔁 Loop: OFF")
-
-            if ms.has_file() and ms.filepath:
-                pos_s = ms.get_position_seconds()
-                dur_s = ms.get_duration_seconds()
-                fname = os.path.basename(ms.filepath)
-                state_icon = "▶" if ms.playing else "⏸"
-                pos_fmt = self._format_time_mmss(pos_s)
-                dur_fmt = self._format_time_mmss(dur_s)
-                self.test_widgets["media_info_label"].config(
-                    text=f"{state_icon} {fname} | {pos_fmt} / {dur_fmt} (SR: {self.config.sample_rate}Hz)",
-                    fg=C_AMARELO,
-                )
-                seek_sl = self.test_widgets.get("seek_slider")
-                if seek_sl is not None and not getattr(seek_sl, "is_dragging", False):
-                    seek_sl.to_ = max(1.0, dur_s)
-                    seek_sl.set(pos_s)
-                if "seek_label" in self.test_widgets:
-                    self.test_widgets["seek_label"].config(text=f"{pos_s:.1f}s / {dur_s:.1f}s")
-            else:
-                self.test_widgets["media_info_label"].config(
-                    text="Arquivo: Nenhum MP3/WAV carregado (Usando Gerador em Tempo Real)",
-                    fg=C_TEXTO2,
-                )
-                if "seek_label" in self.test_widgets:
-                    self.test_widgets["seek_label"].config(text="0.0s / 0.0s")
+        self._sync_active_tab_status()
 
     def update_visuals(self) -> None:
         """Consome todos os blocos pendentes da `visual_queue` em ordem FIFO (T10), alimenta o `SpectrumFFT` e redesenha a UI."""
@@ -1556,8 +1579,13 @@ class EqInterface:
                 self.io.load_media_file(path)
                 dur_raw = self.io.media_streamer.get_duration_seconds()
                 dur = max(1.0, dur_raw)
-                self.test_widgets["seek_slider"].to_ = dur
-                self.test_widgets["seek_slider"].set(0.0)
+                seek_slider = self.test_widgets["seek_slider"]
+                old_value = seek_slider.value
+                range_changed = seek_slider.to_ != dur
+                seek_slider.to_ = dur
+                seek_slider.set(0.0)
+                if range_changed and seek_slider.value == old_value:
+                    seek_slider.draw()
                 if "seek_label" in self.test_widgets:
                     self.test_widgets["seek_label"].config(text=f"0.0s / {dur_raw:.1f}s")
                 self.test_widgets["source_combo"].set(InputSource.MEDIA_FILE.name)
